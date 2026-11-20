@@ -4,6 +4,13 @@ import 'dart:io';
 import 'package:http/http.dart' as http;
 import 'package:path_provider/path_provider.dart';
 
+class _UploadResult {
+  final String path;
+  final String prefix;
+
+  const _UploadResult(this.path, this.prefix);
+}
+
 class Ai3dService {
   static const String _baseUrl = 'https://frogleo-image-to-3d.hf.space';
 
@@ -15,20 +22,18 @@ class Ai3dService {
     try {
       onStatus?.call('Uploading image to AI server...');
       final uploadResult = await _uploadImage(imageFile);
-      final uploadedPath = uploadResult['path']!;
-      final apiPrefix = uploadResult['prefix']!;
 
       onStatus?.call('Starting AI 3D generation...');
       final eventId = await _startGeneration(
-        uploadedPath: uploadedPath,
-        apiPrefix: apiPrefix,
+        uploadedPath: uploadResult.path,
+        apiPrefix: uploadResult.prefix,
       );
 
       onStatus?.call('AI is building your 3D model (30-90 sec)...');
       final glbUrl = await _waitForResult(
         client: client,
         eventId: eventId,
-        apiPrefix: apiPrefix,
+        apiPrefix: uploadResult.prefix,
       );
 
       onStatus?.call('Downloading 3D model (.glb)...');
@@ -39,7 +44,7 @@ class Ai3dService {
     }
   }
 
-  static Future> _uploadImage(File imageFile) async {
+  static Future<_UploadResult> _uploadImage(File imageFile) async {
     for (final prefix in ['', '/gradio_api']) {
       final uri = Uri.parse('$_baseUrl$prefix/upload');
       final request = http.MultipartRequest('POST', uri);
@@ -55,10 +60,7 @@ class Ai3dService {
       if (response.statusCode == 200) {
         final decoded = jsonDecode(response.body);
         if (decoded is List && decoded.isNotEmpty) {
-          return {
-            'path': decoded.first.toString(),
-            'prefix': prefix,
-          };
+          return _UploadResult(decoded.first.toString(), prefix);
         }
       }
       if (response.statusCode != 404 && response.statusCode != 405) {
