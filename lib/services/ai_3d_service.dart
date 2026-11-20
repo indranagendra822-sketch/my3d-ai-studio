@@ -9,21 +9,13 @@ import 'package:path_provider/path_provider.dart';
 class _UploadResult {
   final String path;
   final String prefix;
-
   const _UploadResult(this.path, this.prefix);
 }
 
 class _StartResult {
   final String eventId;
   final String prefix;
-
   const _StartResult(this.eventId, this.prefix);
-}
-
-class _CandidateList {
-  final List<String> urls;
-
-  const _CandidateList(this.urls);
 }
 
 class Ai3dService {
@@ -31,15 +23,13 @@ class Ai3dService {
   static const String _texturedBaseUrl =
       'https://imagine-io-webinar-image-to-3d.hf.space';
 
-  static Map<String, String> _headersFor(String baseUrl) {
-    return {
-      'User-Agent':
-          'Mozilla/5.0 (Linux; Android 14) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126.0.0.0 Mobile Safari/537.36',
-      'Referer': '$baseUrl/',
-      'Origin': baseUrl,
-      'Accept': '*/*',
-    };
-  }
+  static Map<String, String> _headersFor(String baseUrl) => {
+        'User-Agent':
+            'Mozilla/5.0 (Linux; Android 14) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126.0.0.0 Mobile Safari/537.36',
+        'Referer': '$baseUrl/',
+        'Origin': baseUrl,
+        'Accept': '*/*',
+      };
 
   static Future<String> generate3DModel({
     required File imageFile,
@@ -51,182 +41,76 @@ class Ai3dService {
     final client = http.Client();
 
     try {
-      onStatus?.call(
-        withTexture
-            ? 'Uploading image to Color & Texture AI...'
-            : 'Uploading image to Fast AI server...',
-      );
-      final uploadResult = await _uploadImage(baseUrl, imageFile);
+      onStatus?.call(withTexture
+          ? 'Uploading image to Color & Texture AI...'
+          : 'Uploading image to Fast AI server...');
+      final upload = await _uploadImage(baseUrl, imageFile);
 
-      int turboSteps = 5;
-      if (withTexture) {
-        turboSteps = await _fetchTurboSteps(baseUrl, uploadResult.prefix);
-      }
+      onStatus?.call(withTexture
+          ? 'Starting Textured 3D generation...'
+          : 'Starting Fast 3D generation...');
 
-      onStatus?.call(
-        withTexture
-            ? 'Starting Textured 3D generation...'
-            : 'Starting Fast 3D generation...',
-      );
-
-      final Map<String, dynamic> payload = withTexture
+      final payload = withTexture
           ? {
               'data': [
-                {
-                  'path': uploadResult.path,
-                  'meta': {'_type': 'gradio.FileData'},
-                },
-                null,
-                null,
-                null,
-                null,
-                turboSteps,
-                5.5,
-                1234,
-                256,
-                true,
-                8000,
-                true,
+                {'path': upload.path, 'meta': {'_type': 'gradio.FileData'}},
+                null, null, null, null,
+                5, 5.5, 1234, 256, true, 8000, true,
               ],
             }
           : {
               'data': [
-                {
-                  'path': uploadResult.path,
-                  'meta': {'_type': 'gradio.FileData'},
-                },
-                5,
-                5.5,
-                1234,
-                256,
-                8000,
-                10000,
-                true,
+                {'path': upload.path, 'meta': {'_type': 'gradio.FileData'}},
+                5, 5.5, 1234, 256, 8000, 10000, true,
               ],
             };
 
-      final startResult = await _startGeneration(
+      final start = await _startGeneration(
         baseUrl: baseUrl,
-        apiPrefix: uploadResult.prefix,
+        apiPrefix: upload.prefix,
         endpoint: endpoint,
         payload: payload,
       );
 
-      onStatus?.call(
-        withTexture
-            ? 'AI is building 3D shape & painting color texture (1-3 min)...'
-            : 'AI is building your 3D model (30-90 sec)...',
-      );
+      onStatus?.call(withTexture
+          ? 'AI is building 3D shape & painting color texture (1-3 min)...'
+          : 'AI is building your 3D model (30-90 sec)...');
 
-      final candidateList = await _waitForCandidates(
+      final urls = await _waitForCandidates(
         client: client,
         baseUrl: baseUrl,
-        apiPrefix: startResult.prefix,
+        apiPrefix: start.prefix,
         endpoint: endpoint,
-        eventId: startResult.eventId,
+        eventId: start.eventId,
         withTexture: withTexture,
       );
 
       onStatus?.call('Downloading 3D model (.glb)...');
-      final localPath = await _downloadFirstValid3dModel(
-        baseUrl,
-        candidateList.urls,
-        onStatus,
-      );
-      return localPath;
+      return await _downloadFirstValid3dModel(baseUrl, urls, onStatus);
     } finally {
       client.close();
     }
   }
 
-  static Future<_UploadResult> _uploadImage(
-    String baseUrl,
-    File imageFile,
-  ) async {
+  static Future<_UploadResult> _uploadImage(String baseUrl, File file) async {
     for (final prefix in ['', '/gradio_api']) {
-      final uri = Uri.parse('$baseUrl$prefix/upload');
-      final request = http.MultipartRequest('POST', uri);
-      request.headers.addAll(_headersFor(baseUrl));
-      request.files.add(
-        await http.MultipartFile.fromPath('files', imageFile.path),
+      final req = http.MultipartRequest('POST', Uri.parse('$baseUrl$prefix/upload'));
+      req.headers.addAll(_headersFor(baseUrl));
+      req.files.add(await http.MultipartFile.fromPath('files', file.path));
+      final res = await http.Response.fromStream(
+        await req.send().timeout(const Duration(seconds: 60)),
       );
-
-      final streamedResponse = await request.send().timeout(
-        const Duration(seconds: 60),
-      );
-      final response = await http.Response.fromStream(streamedResponse);
-
-      if (response.statusCode == 200) {
-        final decoded = jsonDecode(response.body);
+      if (res.statusCode == 200) {
+        final decoded = jsonDecode(res.body);
         if (decoded is List && decoded.isNotEmpty) {
           return _UploadResult(decoded.first.toString(), prefix);
         }
       }
-      if (response.statusCode != 404 && response.statusCode != 405) {
-        throw Exception('Image upload failed (${response.statusCode})');
+      if (res.statusCode != 404 && res.statusCode != 405) {
+        throw Exception('Image upload failed (${res.statusCode})');
       }
     }
     throw Exception('AI server upload endpoint not found.');
-  }
-
-  static Future<int> _fetchTurboSteps(
-    String baseUrl,
-    String apiPrefix,
-  ) async {
-    try {
-      final headers = _headersFor(baseUrl);
-      headers['Content-Type'] = 'application/json';
-
-      for (final prefix in [
-        apiPrefix,
-        apiPrefix.isEmpty ? '/gradio_api' : '',
-      ]) {
-        final postUri = Uri.parse('$baseUrl$prefix/call/on_gen_mode_change');
-        final postResp = await http
-            .post(
-              postUri,
-              headers: headers,
-              body: jsonEncode({
-                'data': ['Turbo']
-              }),
-            )
-            .timeout(const Duration(seconds: 10));
-
-        if (postResp.statusCode != 200) continue;
-        final decoded = jsonDecode(postResp.body);
-        final eventId =
-            (decoded is Map) ? decoded['event_id']?.toString() : null;
-        if (eventId == null || eventId.isEmpty) continue;
-
-        final getUri =
-            Uri.parse('$baseUrl$prefix/call/on_gen_mode_change/$eventId');
-        final getResp = await http
-            .get(getUri, headers: _headersFor(baseUrl))
-            .timeout(const Duration(seconds: 10));
-
-        if (getResp.statusCode != 200) continue;
-        for (final line in const LineSplitter().convert(getResp.body)) {
-          if (line.startsWith('data:')) {
-            final raw = line.substring(5).trim();
-            if (raw.isEmpty || raw == 'null') continue;
-            final data = jsonDecode(raw);
-            if (data is List && data.isNotEmpty) {
-              final first = data.first;
-              int? parsed;
-              if (first is num) {
-                parsed = first.round();
-              } else if (first is Map && first['value'] is num) {
-                parsed = (first['value'] as num).round();
-              }
-              if (parsed != null && parsed >= 1 && parsed <= 50) {
-                return parsed;
-              }
-            }
-          }
-        }
-      }
-    } catch (_) {}
-    return 5;
   }
 
   static Future<_StartResult> _startGeneration({
@@ -235,44 +119,30 @@ class Ai3dService {
     required String endpoint,
     required Map<String, dynamic> payload,
   }) async {
-    final headers = _headersFor(baseUrl);
-    headers['Content-Type'] = 'application/json';
-
-    final prefixesToTry = [
-      apiPrefix,
-      apiPrefix.isEmpty ? '/gradio_api' : '',
-    ];
-
+    final headers = _headersFor(baseUrl)..['Content-Type'] = 'application/json';
     String lastError = 'AI server did not respond.';
 
-    for (final prefix in prefixesToTry) {
-      final uri = Uri.parse('$baseUrl$prefix/call$endpoint');
-      final response = await http
-          .post(
-            uri,
-            headers: headers,
-            body: jsonEncode(payload),
-          )
+    for (final prefix in [apiPrefix, apiPrefix.isEmpty ? '/gradio_api' : '']) {
+      final res = await http
+          .post(Uri.parse('$baseUrl$prefix/call$endpoint'),
+              headers: headers, body: jsonEncode(payload))
           .timeout(const Duration(seconds: 60));
 
-      if (response.statusCode == 200) {
-        final decoded = jsonDecode(response.body);
+      if (res.statusCode == 200) {
+        final decoded = jsonDecode(res.body);
         if (decoded is Map && decoded['event_id'] != null) {
           return _StartResult(decoded['event_id'].toString(), prefix);
         }
       }
-
-      lastError =
-          'AI server error (${response.statusCode}): ${_truncate(response.body, 150)}';
-      if (response.statusCode != 404 && response.statusCode != 405) {
+      lastError = 'AI server error (${res.statusCode}):${_truncate(res.body, 140)}';
+      if (res.statusCode != 404 && res.statusCode != 405) {
         throw Exception(lastError);
       }
     }
-
     throw Exception(lastError);
   }
 
-  static Future<_CandidateList> _waitForCandidates({
+  static Future<List<String>> _waitForCandidates({
     required http.Client client,
     required String baseUrl,
     required String apiPrefix,
@@ -280,378 +150,273 @@ class Ai3dService {
     required String eventId,
     required bool withTexture,
   }) async {
-    final uri = Uri.parse('$baseUrl$apiPrefix/call$endpoint/$eventId');
-    final request = http.Request('GET', uri);
-    request.headers.addAll(_headersFor(baseUrl));
-    request.headers['Accept'] = 'text/event-stream';
+    final req = http.Request('GET', Uri.parse('$baseUrl$apiPrefix/call$endpoint/$eventId'));
+    req.headers.addAll(_headersFor(baseUrl));
+    req.headers['Accept'] = 'text/event-stream';
 
-    final timeout =
-        withTexture ? const Duration(minutes: 6) : const Duration(minutes: 4);
-
-    final response = await client.send(request).timeout(timeout);
-
-    if (response.statusCode != 200) {
-      throw Exception('Failed to read AI result (${response.statusCode})');
+    final timeout = Duration(minutes: withTexture ? 6 : 4);
+    final res = await client.send(req).timeout(timeout);
+    if (res.statusCode != 200) {
+      throw Exception('Failed to read AI result (${res.statusCode})');
     }
 
     String currentEvent = '';
-    final lines = response.stream
-        .transform(utf8.decoder)
-        .transform(const LineSplitter());
-
+    final lines = res.stream.transform(utf8.decoder).transform(const LineSplitter());
     await for (final line in lines.timeout(timeout)) {
       if (line.startsWith('event:')) {
         currentEvent = line.substring(6).trim();
       } else if (line.startsWith('data:')) {
         final dataStr = line.substring(5).trim();
-
         if (currentEvent == 'error') {
           if (dataStr.toLowerCase().contains('quota')) {
-            throw Exception(
-              'Free GPU quota limit reached. Try Fast mode or try again later.',
-            );
+            throw Exception('Free GPU quota limit reached. Try Fast mode or try later.');
           }
-          throw Exception(
-            'AI generation failed: ${dataStr.isEmpty ? "Server busy" : _truncate(dataStr, 180)}',
-          );
+          throw Exception('AI generation failed: ${dataStr.isEmpty ? "Server busy" : _truncate(dataStr, 160)}');
         }
-
         if (currentEvent == 'complete') {
-          final decoded = jsonDecode(dataStr);
           final candidates = _extractCandidates(
-            decoded,
-            baseUrl,
-            apiPrefix,
-            withTexture,
+            jsonDecode(dataStr), baseUrl, apiPrefix, withTexture,
           );
-          if (candidates.isNotEmpty) {
-            return _CandidateList(candidates);
-          }
-          throw Exception(
-            '3D model link not found. Response: ${_truncate(dataStr, 200)}',
-          );
+          if (candidates.isNotEmpty) return candidates;
+          throw Exception('3D model link not found.');
         }
       }
     }
-
     throw Exception('Connection closed before 3D model finished.');
   }
 
   static List<String> _extractCandidates(
-    dynamic decoded,
-    String baseUrl,
-    String apiPrefix,
-    bool withTexture,
+    dynamic decoded, String baseUrl, String apiPrefix, bool withTexture,
   ) {
-    final List<String> urls = [];
-
-    void addUnique(String url) {
-      if (url.isNotEmpty && !urls.contains(url)) {
-        urls.add(url);
-      }
+    final urls = <String>[];
+    void addUnique(String u) {
+      if (u.isNotEmpty && !urls.contains(u)) urls.add(u);
     }
 
     void addCandidate(String raw) {
-      final value = raw.trim();
-      if (value.isEmpty) return;
+      final v = raw.trim();
+      if (v.isEmpty) return;
+      if (v.startsWith('data:')) return addUnique(v);
+      if (v.startsWith('/static/')) addUnique('$baseUrl${Uri.encodeFull(v)}');
+      if (v.startsWith('static/')) addUnique('$baseUrl/${Uri.encodeFull(v)}');
 
-      if (value.startsWith('data:')) {
-        addUnique(value);
-        return;
-      }
-
-      if (value.startsWith('/static/')) {
-        addUnique('$baseUrl${Uri.encodeFull(value)}');
-      } else if (value.startsWith('static/')) {
-        addUnique('$baseUrl/${Uri.encodeFull(value)}');
-      }
-
-      if (value.startsWith('http://') || value.startsWith('https://')) {
-        final httpBase = baseUrl.replaceFirst('https://', 'http://');
-        final fixed = value.replaceFirst(httpBase, baseUrl);
+      if (v.startsWith('http://') || v.startsWith('https://')) {
+        final fixed = v.replaceFirst(baseUrl.replaceFirst('https://', 'http://'), baseUrl);
         if (fixed.contains('/file=/static/')) {
           addUnique(fixed.replaceFirst('/file=/static/', '/static/'));
         }
         addUnique(fixed);
-        if (fixed.contains('$baseUrl/file=') &&
-            !fixed.contains('/gradio_api/file=')) {
-          addUnique(
-            fixed.replaceFirst('$baseUrl/file=', '$baseUrl/gradio_api/file='),
-          );
+        if (fixed.contains('$baseUrl/file=') && !fixed.contains('/gradio_api/file=')) {
+          addUnique(fixed.replaceFirst('$baseUrl/file=', '$baseUrl/gradio_api/file='));
         } else if (fixed.contains('$baseUrl/gradio_api/file=')) {
-          addUnique(
-            fixed.replaceFirst('$baseUrl/gradio_api/file=', '$baseUrl/file='),
-          );
+          addUnique(fixed.replaceFirst('$baseUrl/gradio_api/file=', '$baseUrl/file='));
         }
         return;
       }
 
-      if (value.startsWith('/gradio_api/file=') || value.startsWith('/file=')) {
-        addCandidate('$baseUrl$value');
-        return;
+      if (v.startsWith('/gradio_api/file=') || v.startsWith('/file=')) {
+        return addCandidate('$baseUrl$v');
+      }
+      if (v.startsWith('gradio_api/file=') || v.startsWith('file=')) {
+        return addCandidate('$baseUrl/$v');
       }
 
-      if (value.startsWith('gradio_api/file=') || value.startsWith('file=')) {
-        addCandidate('$baseUrl/$value');
-        return;
-      }
-
-      final cleaned = value.startsWith('./') ? value.substring(2) : value;
-      final encoded = Uri.encodeFull(cleaned);
-      addUnique('$baseUrl$apiPrefix/file=$encoded');
-      addUnique('$baseUrl/gradio_api/file=$encoded');
-      addUnique('$baseUrl/file=$encoded');
+      final enc = Uri.encodeFull(v.startsWith('./') ? v.substring(2) : v);
+      addUnique('$baseUrl$apiPrefix/file=$enc');
+      addUnique('$baseUrl/gradio_api/file=$enc');
+      addUnique('$baseUrl/file=$enc');
     }
 
-    void collectFromItem(dynamic item) {
+    void collect(dynamic item) {
       if (item == null) return;
-
       if (item is String) {
         if (item.contains('<')) {
-          final dataUriRegex = RegExp(
-            r'''data:[^"'\s<>]+;base64,[A-Za-z0-9+/=]+''',
+          final reg = RegExp(
+            r'''(data:[^"'\s<>]+;base64,[A-Za-z0-9+/=]+|https?:\/\/[^\s"'<>]+\.(?:glb|obj)[^\s"'<>]*|\/?static\/[^\s"'<>]+\.(?:glb|obj)[^\s"'<>]*|\/?(?:gradio_api\/)?file=[^\s"'<>]+\.(?:glb|obj)[^\s"'<>]*)''',
             caseSensitive: false,
           );
-          for (final match in dataUriRegex.allMatches(item)) {
-            final found = match.group(0);
-            if (found != null) addCandidate(found);
-          }
-
-          final urlRegex = RegExp(
-            r'''(https?:\/\/[^\s"'<>]+\.(?:glb|obj)[^\s"'<>]*|\/?static\/[^\s"'<>]+\.(?:glb|obj)[^\s"'<>]*|\/?(?:gradio_api\/)?file=[^\s"'<>]+\.(?:glb|obj)[^\s"'<>]*)''',
-            caseSensitive: false,
-          );
-          for (final match in urlRegex.allMatches(item)) {
-            final found = match.group(0);
-            if (found != null) addCandidate(found);
+          for (final m in reg.allMatches(item)) {
+            if (m.group(0) != null) addCandidate(m.group(0)!);
           }
         } else {
           addCandidate(item);
         }
-        return;
-      }
-
-      if (item is Map) {
-        collectFromItem(item['url']);
-        collectFromItem(item['value']);
-        collectFromItem(item['path']);
-        collectFromItem(item['name']);
-        return;
-      }
-
-      if (item is List) {
-        for (final element in item) {
-          collectFromItem(element);
+      } else if (item is Map) {
+        collect(item['url']);
+        collect(item['value']);
+        collect(item['path']);
+        collect(item['name']);
+      } else if (item is List) {
+        for (final e in item) {
+          collect(e);
         }
       }
     }
 
     if (decoded is List) {
-      if (withTexture) {
-        // /generation_all returns [0]=white, [1]=textured, [2]=html
-        if (decoded.length > 1) collectFromItem(decoded[1]);
-        if (decoded.length > 2) collectFromItem(decoded[2]);
-        if (decoded.isNotEmpty) collectFromItem(decoded[0]);
-      } else {
-        // /gen_shape returns [0]=html, [1]=download, [2]=glbPath, [3]=objPath
-        if (decoded.length > 2) collectFromItem(decoded[2]);
-        if (decoded.isNotEmpty) collectFromItem(decoded[0]);
-        if (decoded.length > 1) collectFromItem(decoded[1]);
-        if (decoded.length > 3) collectFromItem(decoded[3]);
+      final order = withTexture ? [1, 2, 0] : [2, 0, 1, 3];
+      for (final i in order) {
+        if (i < decoded.length) collect(decoded[i]);
       }
     } else {
-      collectFromItem(decoded);
+      collect(decoded);
     }
 
-    final List<String> glbUrls = [];
-    final List<String> objUrls = [];
-    final List<String> others = [];
-
-    for (final u in urls) {
-      final lower = u.toLowerCase();
-      if (lower.contains('.glb') || lower.startsWith('data:')) {
-        glbUrls.add(u);
-      } else if (lower.contains('.obj')) {
-        objUrls.add(u);
-      } else {
-        others.add(u);
-      }
-    }
-
-    return [...glbUrls, ...objUrls, ...others];
+    final glbs = urls.where((u) => u.toLowerCase().contains('.glb') || u.startsWith('data:')).toList();
+    final objs = urls.where((u) => u.toLowerCase().contains('.obj') && !glbs.contains(u)).toList();
+    final rest = urls.where((u) => !glbs.contains(u) && !objs.contains(u)).toList();
+    return [...glbs, ...objs, ...rest];
   }
 
-  static List<int>? _extractValidGlbBytes(List<int> raw) {
-    if (_hasGlbHeader(raw)) return raw;
+  static bool _isGlb(List<int> b) =>
+      b.length >= 12 && b[0] == 0x67 && b[1] == 0x6C && b[2] == 0x54 && b[3] == 0x46;
 
+  static List<int>? _validGlb(List<int> raw) {
+    if (_isGlb(raw)) return raw;
     if (raw.length >= 2 && raw[0] == 0x1F && raw[1] == 0x8B) {
       try {
-        final unzipped = gzip.decode(raw);
-        if (_hasGlbHeader(unzipped)) return unzipped;
+        final u = gzip.decode(raw);
+        if (_isGlb(u)) return u;
       } catch (_) {}
     }
-
     return null;
   }
 
-  static bool _hasGlbHeader(List<int> bytes) {
-    return bytes.length >= 12 &&
-        bytes[0] == 0x67 &&
-        bytes[1] == 0x6C &&
-        bytes[2] == 0x54 &&
-        bytes[3] == 0x46;
-  }
-
   static Future<String> _downloadFirstValid3dModel(
-    String baseUrl,
-    List<String> candidates,
-    void Function(String status)? onStatus,
+    String baseUrl, List<String> urls, void Function(String)? onStatus,
   ) async {
-    final List<String> attemptLogs = [];
+    final logs = <String>[];
     final headers = _headersFor(baseUrl);
 
-    for (final url in candidates) {
+    for (final url in urls) {
       try {
         if (url.startsWith('data:')) {
-          final commaIndex = url.indexOf(',');
-          if (commaIndex != -1) {
-            final bytes = base64Decode(url.substring(commaIndex + 1));
-            final validGlb = _extractValidGlbBytes(bytes);
-            if (validGlb != null) {
-              return _saveGlbBytes(validGlb);
-            }
+          final i = url.indexOf(',');
+          if (i != -1) {
+            final g = _validGlb(base64Decode(url.substring(i + 1)));
+            if (g != null) return _saveGlb(g);
           }
           continue;
         }
-
-        final response = await http
-            .get(Uri.parse(url), headers: headers)
-            .timeout(const Duration(minutes: 3));
-
-        if (response.statusCode == 200 && response.bodyBytes.isNotEmpty) {
-          final validGlb = _extractValidGlbBytes(response.bodyBytes);
-          if (validGlb != null) {
-            return _saveGlbBytes(validGlb);
-          }
-
-          final text = utf8.decode(response.bodyBytes, allowMalformed: true);
-          if (_looksLikeObj(text)) {
+        final res = await http.get(Uri.parse(url), headers: headers).timeout(const Duration(minutes: 3));
+        if (res.statusCode == 200 && res.bodyBytes.isNotEmpty) {
+          final g = _validGlb(res.bodyBytes);
+          if (g != null) return _saveGlb(g);
+          final txt = utf8.decode(res.bodyBytes, allowMalformed: true);
+          if (RegExp(r'^v\s+-?\d', multiLine: true).hasMatch(txt) &&
+              RegExp(r'^f\s+\d', multiLine: true).hasMatch(txt)) {
             onStatus?.call('Converting 3D mesh to GLB...');
-            final converted = _convertObjToGlb(text);
-            if (converted != null) {
-              return _saveGlbBytes(converted);
-            }
+            final converted = _objToGlb(txt);
+            if (converted != null) return _saveGlb(converted);
           }
-
-          attemptLogs.add(
-            'Unsupported (${response.bodyBytes.length}B) ${_shortUrl(baseUrl, url)}',
-          );
+          logs.add('Unsupported ${url.replaceFirst(baseUrl, '')}');
         } else {
-          attemptLogs.add(
-            'HTTP ${response.statusCode} ${_shortUrl(baseUrl, url)}',
-          );
+          logs.add('HTTP ${res.statusCode}${url.replaceFirst(baseUrl, '')}');
         }
       } catch (e) {
-        attemptLogs.add('ERR ${_shortUrl(baseUrl, url)}: $e');
+        logs.add('ERR: $e');
       }
     }
-
-    final details = attemptLogs.isEmpty
-        ? 'No download URLs'
-        : attemptLogs.take(4).join('\n');
-    throw Exception('Could not load 3D model.\n$details');
+    throw Exception('Could not load 3D model.\n${logs.take(4).join('\n')}');
   }
 
-  static bool _looksLikeObj(String text) {
-    return RegExp(r'^v\s+-?\d', multiLine: true).hasMatch(text) &&
-        RegExp(r'^f\s+\d', multiLine: true).hasMatch(text);
-  }
-
-  static Uint8List? _convertObjToGlb(String objText) {
-    final List<double> posList = [];
-    final List<int> idxList = [];
-
-    for (final rawLine in const LineSplitter().convert(objText)) {
-      final line = rawLine.trim();
-      if (line.isEmpty || line.startsWith('#')) continue;
-
+  static Uint8List? _objToGlb(String objText) {
+    final pos = <double>[];
+    final idx = <int>[];
+    for (final raw in const LineSplitter().convert(objText)) {
+      final line = raw.trim();
       if (line.startsWith('v ')) {
-        final parts = line.split(RegExp(r'\s+'));
-        if (parts.length >= 4) {
-          final x = double.tryParse(parts[1]);
-          final y = double.tryParse(parts[2]);
-          final z = double.tryParse(parts[3]);
-          if (x != null && y != null && z != null) {
-            posList.add(x);
-            posList.add(y);
-            posList.add(z);
-          }
+        final p = line.split(RegExp(r'\s+'));
+        if (p.length >= 4) {
+          final x = double.tryParse(p[1]), y = double.tryParse(p[2]), z = double.tryParse(p[3]);
+          if (x != null && y != null && z != null) pos.addAll([x, y, z]);
         }
       } else if (line.startsWith('f ')) {
-        final parts = line.split(RegExp(r'\s+'));
-        final vertexCount = posList.length ~/ 3;
-        final List<int> faceIndices = [];
-
-        for (int i = 1; i < parts.length; i++) {
-          final token = parts[i].split('/')[0];
-          final parsed = int.tryParse(token);
-          if (parsed == null) continue;
-          final idx = parsed > 0 ? parsed - 1 : vertexCount + parsed;
-          if (idx >= 0 && idx < vertexCount) {
-            faceIndices.add(idx);
+        final p = line.split(RegExp(r'\s+'));
+        final vc = pos.length ~/ 3;
+        final face = <int>[];
+        for (int i = 1; i < p.length; i++) {
+          final v = int.tryParse(p[i].split('/')[0]);
+          if (v != null) {
+            final k = v > 0 ? v - 1 : vc + v;
+            if (k >= 0 && k < vc) face.add(k);
           }
         }
-
-        if (faceIndices.length >= 3) {
-          for (int i = 1; i < faceIndices.length - 1; i++) {
-            idxList.add(faceIndices[0]);
-            idxList.add(faceIndices[i]);
-            idxList.add(faceIndices[i + 1]);
-          }
+        for (int i = 1; i + 1 < face.length; i++) {
+          idx.addAll([face[0], face[i], face[i + 1]]);
         }
       }
     }
+    final vc = pos.length ~/ 3;
+    if (vc < 3 || idx.length < 3) return null;
 
-    final vertexCount = posList.length ~/ 3;
-    if (vertexCount < 3 || idxList.length < 3) return null;
-
-    double minX = posList[0], maxX = posList[0];
-    double minY = posList[1], maxY = posList[1];
-    double minZ = posList[2], maxZ = posList[2];
-
-    for (int i = 0; i < posList.length; i += 3) {
-      final x = posList[i];
-      final y = posList[i + 1];
-      final z = posList[i + 2];
-      if (x < minX) minX = x;
-      if (x > maxX) maxX = x;
-      if (y < minY) minY = y;
-      if (y > maxY) maxY = y;
-      if (z < minZ) minZ = z;
-      if (z > maxZ) maxZ = z;
+    double minX = pos[0], maxX = pos[0], minY = pos[1], maxY = pos[1], minZ = pos[2], maxZ = pos[2];
+    for (int i = 0; i < pos.length; i += 3) {
+      minX = math.min(minX, pos[i]); maxX = math.max(maxX, pos[i]);
+      minY = math.min(minY, pos[i + 1]); maxY = math.max(maxY, pos[i + 1]);
+      minZ = math.min(minZ, pos[i + 2]); maxZ = math.max(maxZ, pos[i + 2]);
     }
 
-    final positions = Float32List.fromList(posList);
-    final normals = Float32List(posList.length);
-    final indices = Uint32List.fromList(idxList);
+    final positions = Float32List.fromList(pos);
+    final normals = Float32List(pos.length);
+    final indices = Uint32List.fromList(idx);
 
     for (int i = 0; i < indices.length; i += 3) {
-      final i0 = indices[i] * 3;
-      final i1 = indices[i + 1] * 3;
-      final i2 = indices[i + 2] * 3;
+      final i0 = indices[i] * 3, i1 = indices[i + 1] * 3, i2 = indices[i + 2] * 3;
+      final ax = positions[i1] - positions[i0], ay = positions[i1 + 1] - positions[i0 + 1], az = positions[i1 + 2] - positions[i0 + 2];
+      final bx = positions[i2] - positions[i0], by = positions[i2 + 1] - positions[i0 + 1], bz = positions[i2 + 2] - positions[i0 + 2];
+      final nx = ay * bz - az * by, ny = az * bx - ax * bz, nz = ax * by - ay * bx;
+      for (final j in [i0, i1, i2]) {
+        normals[j] += nx; normals[j + 1] += ny; normals[j + 2] += nz;
+      }
+    }
+    for (int i = 0; i < normals.length; i += 3) {
+      final len = math.sqrt(normals[i] * normals[i] + normals[i + 1] * normals[i + 1] + normals[i + 2] * normals[i + 2]);
+      if (len > 1e-8) {
+        normals[i] /= len; normals[i + 1] /= len; normals[i + 2] /= len;
+      } else {
+        normals[i + 1] = 1.0;
+      }
+    }
 
-      final ax = positions[i1] - positions[i0];
-      final ay = positions[i1 + 1] - positions[i0 + 1];
-      final az = positions[i1 + 2] - positions[i0 + 2];
+    final pLen = positions.length * 4, nLen = normals.length * 4, iLen = indices.length * 4;
+    final binLen = pLen + nLen + iLen;
+    final bin = ByteData(binLen);
+    int off = 0;
+    for (final v in positions) { bin.setFloat32(off, v, Endian.little); off += 4; }
+    for (final v in normals) { bin.setFloat32(off, v, Endian.little); off += 4; }
+    for (final v in indices) { bin.setUint32(off, v, Endian.little); off += 4; }
 
-      final bx = positions[i2] - positions[i0];
-      final by = positions[i2 + 1] - positions[i0 + 1];
-      final bz = positions[i2 + 2] - positions[i0 + 2];
+    final gltf = {
+      'asset': {'version': '2.0', 'generator': 'My3D AI Studio'},
+      'scene': 0,
+      'scenes': [{'nodes': [0]}],
+      'nodes': [{'mesh': 0}],
+      'materials': [{
+        'pbrMetallicRoughness': {'baseColorFactor': [0.85, 0.85, 0.88, 1.0], 'metallicFactor': 0.1, 'roughnessFactor': 0.7},
+        'doubleSided': true,
+      }],
+      'meshes': [{'primitives': [{'attributes': {'POSITION': 0, 'NORMAL': 1}, 'indices': 2, 'material': 0}]}],
+      'buffers': [{'byteLength': binLen}],
+      'bufferViews': [
+        {'buffer': 0, 'byteOffset': 0, 'byteLength': pLen, 'target': 34962},
+        {'buffer': 0, 'byteOffset': pLen, 'byteLength': nLen, 'target': 34962},
+        {'buffer': 0, 'byteOffset': pLen + nLen, 'byteLength': iLen, 'target': 34963},
+      ],
+      'accessors': [
+        {'bufferView': 0, 'componentType': 5126, 'count': vc, 'type': 'VEC3', 'min': [minX, minY, minZ], 'max': [maxX, maxY, maxZ]},
+        {'bufferView': 1, 'componentType': 5126, 'count': vc, 'type': 'VEC3'},
+        {'bufferView': 2, 'componentType': 5125, 'count': indices.length, 'type': 'SCALAR'},
+      ],
+    };
 
-      final nx = ay * bz - az * by;
-      final ny = az * bx - ax * bz;
-      final nz = ax * by - ay * bx;
-
-      normals[i0] += nx;
-      normals[i0 + 1] += ny;
-      normals[i0 + 2] += nz;
+    final jRaw = utf8.encode(jsonEncode(gltf));
+    final jPad = (4 - (jRaw.length % 4)) % 4;
+    final jLen = jRaw.length + jPad;
+    final total = 12 + 8 + jLen + 8 + binLen;
+    final out = Uint8List(total);
+    final h = ByteData.sublistView(out);
+    h.setUint32(0, 0x46546C67, Endian.little);
+    h.setUint32(4, 2, Endian.little);
+    h.setUint32(8, total, Endian.little);
+    h.setUint32(12, jLen,
