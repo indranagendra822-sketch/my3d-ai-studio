@@ -13,52 +13,140 @@ class _UploadResult {
   const _UploadResult(this.path, this.prefix);
 }
 
-class Ai3dService {
-  static const String _baseUrl = 'https://frogleo-image-to-3d.hf.space';
+class _StartResult {
+  final String eventId;
+  final String prefix;
 
-  static const Map<String, String> _browserHeaders = {
-    'User-Agent':
-        'Mozilla/5.0 (Linux; Android 14) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126.0.0.0 Mobile Safari/537.36',
-    'Referer': '$_baseUrl/',
-    'Origin': _baseUrl,
-    'Accept': '*/*',
-  };
+  const _StartResult(this.eventId, this.prefix);
+}
+
+class _CandidateList {
+  final List<String> urls;
+
+  const _CandidateList(this.urls);
+}
+
+class Ai3dService {
+  static const String _fastBaseUrl = 'https://frogleo-image-to-3d.hf.space';
+  static const String _texturedBaseUrl =
+      'https://imagine-io-webinar-image-to-3d.hf.space';
+
+  static Map<String, String> _headersFor(String baseUrl) {
+    return {
+      'User-Agent':
+          'Mozilla/5.0 (Linux; Android 14) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126.0.0.0 Mobile Safari/537.36',
+      'Referer': '$baseUrl/',
+      'Origin': baseUrl,
+      'Accept': '*/*',
+    };
+  }
 
   static Future<String> generate3DModel({
     required File imageFile,
+    bool withTexture = false,
     void Function(String status)? onStatus,
   }) async {
+    final baseUrl = withTexture ? _texturedBaseUrl : _fastBaseUrl;
+    final endpoint = withTexture ? '/generation_all' : '/gen_shape';
     final client = http.Client();
+
     try {
-      onStatus?.call('Uploading image to AI server...');
-      final uploadResult = await _uploadImage(imageFile);
+      onStatus?.call(
+        withTexture
+            ? 'Uploading image to Color & Texture AI...'
+            : 'Uploading image to Fast AI server...',
+      );
+      final uploadResult = await _uploadImage(baseUrl, imageFile);
 
-      onStatus?.call('Starting AI 3D generation...');
-      final eventId = await _startGeneration(
-        uploadedPath: uploadResult.path,
-        apiPrefix: uploadResult.prefix,
+      int turboSteps = 5;
+      if (withTexture) {
+        turboSteps = await _fetchTurboSteps(baseUrl, uploadResult.prefix);
+      }
+
+      onStatus?.call(
+        withTexture
+            ? 'Starting Textured 3D generation...'
+            : 'Starting Fast 3D generation...',
       );
 
-      onStatus?.call('AI is building your 3D model (30-90 sec)...');
-      final candidates = await _waitForCandidates(
+      final Map<String, dynamic> payload = withTexture
+          ? {
+              'data': [
+                {
+                  'path': uploadResult.path,
+                  'meta': {'_type': 'gradio.FileData'},
+                },
+                null,
+                null,
+                null,
+                null,
+                turboSteps,
+                5.5,
+                1234,
+                256,
+                true,
+                8000,
+                true,
+              ],
+            }
+          : {
+              'data': [
+                {
+                  'path': uploadResult.path,
+                  'meta': {'_type': 'gradio.FileData'},
+                },
+                5,
+                5.5,
+                1234,
+                256,
+                8000,
+                10000,
+                true,
+              ],
+            };
+
+      final startResult = await _startGeneration(
+        baseUrl: baseUrl,
+        apiPrefix: uploadResult.prefix,
+        endpoint: endpoint,
+        payload: payload,
+      );
+
+      onStatus?.call(
+        withTexture
+            ? 'AI is building 3D shape & painting color texture (1-3 min)...'
+            : 'AI is building your 3D model (30-90 sec)...',
+      );
+
+      final candidateList = await _waitForCandidates(
         client: client,
-        eventId: eventId,
-        apiPrefix: uploadResult.prefix,
+        baseUrl: baseUrl,
+        apiPrefix: startResult.prefix,
+        endpoint: endpoint,
+        eventId: startResult.eventId,
+        withTexture: withTexture,
       );
 
-      onStatus?.call('Downloading 3D model...');
-      final localPath = await _downloadFirstValid3dModel(candidates, onStatus);
+      onStatus?.call('Downloading 3D model (.glb)...');
+      final localPath = await _downloadFirstValid3dModel(
+        baseUrl,
+        candidateList.urls,
+        onStatus,
+      );
       return localPath;
     } finally {
       client.close();
     }
   }
 
-  static Future<_UploadResult> _uploadImage(File imageFile) async {
+  static Future<_UploadResult> _uploadImage(
+    String baseUrl,
+    File imageFile,
+  ) async {
     for (final prefix in ['', '/gradio_api']) {
-      final uri = Uri.parse('$_baseUrl$prefix/upload');
+      final uri = Uri.parse('$baseUrl$prefix/upload');
       final request = http.MultipartRequest('POST', uri);
-      request.headers.addAll(_browserHeaders);
+      request.headers.addAll(_headersFor(baseUrl));
       request.files.add(
         await http.MultipartFile.fromPath('files', imageFile.path),
       );
@@ -81,64 +169,126 @@ class Ai3dService {
     throw Exception('AI server upload endpoint not found.');
   }
 
-  static Future<String> _startGeneration({
-    required String uploadedPath,
-    required String apiPrefix,
-  }) async {
-    final uri = Uri.parse('$_baseUrl$apiPrefix/call/gen_shape');
-    final payload = {
-      'data': [
-        {
-          'path': uploadedPath,
-          'meta': {'_type': 'gradio.FileData'},
-        },
-        5,
-        5.5,
-        1234,
-        256,
-        8000,
-        10000,
-        true,
-      ],
-    };
+  static Future<int> _fetchTurboSteps(
+    String baseUrl,
+    String apiPrefix,
+  ) async {
+    try {
+      final headers = _headersFor(baseUrl);
+      headers['Content-Type'] = 'application/json';
 
-    final headers = Map<String, String>.from(_browserHeaders);
-    headers['Content-Type'] = 'application/json';
+      for (final prefix in [
+        apiPrefix,
+        apiPrefix.isEmpty ? '/gradio_api' : '',
+      ]) {
+        final postUri = Uri.parse('$baseUrl$prefix/call/on_gen_mode_change');
+        final postResp = await http
+            .post(
+              postUri,
+              headers: headers,
+              body: jsonEncode({
+                'data': ['Turbo']
+              }),
+            )
+            .timeout(const Duration(seconds: 10));
 
-    final response = await http
-        .post(
-          uri,
-          headers: headers,
-          body: jsonEncode(payload),
-        )
-        .timeout(const Duration(seconds: 60));
+        if (postResp.statusCode != 200) continue;
+        final decoded = jsonDecode(postResp.body);
+        final eventId =
+            (decoded is Map) ? decoded['event_id']?.toString() : null;
+        if (eventId == null || eventId.isEmpty) continue;
 
-    if (response.statusCode != 200) {
-      throw Exception(
-        'AI server error (${response.statusCode}): ${_truncate(response.body, 150)}',
-      );
-    }
+        final getUri =
+            Uri.parse('$baseUrl$prefix/call/on_gen_mode_change/$eventId');
+        final getResp = await http
+            .get(getUri, headers: _headersFor(baseUrl))
+            .timeout(const Duration(seconds: 10));
 
-    final decoded = jsonDecode(response.body);
-    if (decoded is Map && decoded['event_id'] != null) {
-      return decoded['event_id'].toString();
-    }
-    throw Exception('Invalid response from AI server.');
+        if (getResp.statusCode != 200) continue;
+        for (final line in const LineSplitter().convert(getResp.body)) {
+          if (line.startsWith('data:')) {
+            final raw = line.substring(5).trim();
+            if (raw.isEmpty || raw == 'null') continue;
+            final data = jsonDecode(raw);
+            if (data is List && data.isNotEmpty) {
+              final first = data.first;
+              int? parsed;
+              if (first is num) {
+                parsed = first.round();
+              } else if (first is Map && first['value'] is num) {
+                parsed = (first['value'] as num).round();
+              }
+              if (parsed != null && parsed >= 1 && parsed <= 50) {
+                return parsed;
+              }
+            }
+          }
+        }
+      }
+    } catch (_) {}
+    return 5;
   }
 
-  static Future<List<String>> _waitForCandidates({
-    required http.Client client,
-    required String eventId,
+  static Future<_StartResult> _startGeneration({
+    required String baseUrl,
     required String apiPrefix,
+    required String endpoint,
+    required Map<String, dynamic> payload,
   }) async {
-    final uri = Uri.parse('$_baseUrl$apiPrefix/call/gen_shape/$eventId');
+    final headers = _headersFor(baseUrl);
+    headers['Content-Type'] = 'application/json';
+
+    final prefixesToTry = [
+      apiPrefix,
+      apiPrefix.isEmpty ? '/gradio_api' : '',
+    ];
+
+    String lastError = 'AI server did not respond.';
+
+    for (final prefix in prefixesToTry) {
+      final uri = Uri.parse('$baseUrl$prefix/call$endpoint');
+      final response = await http
+          .post(
+            uri,
+            headers: headers,
+            body: jsonEncode(payload),
+          )
+          .timeout(const Duration(seconds: 60));
+
+      if (response.statusCode == 200) {
+        final decoded = jsonDecode(response.body);
+        if (decoded is Map && decoded['event_id'] != null) {
+          return _StartResult(decoded['event_id'].toString(), prefix);
+        }
+      }
+
+      lastError =
+          'AI server error (${response.statusCode}): ${_truncate(response.body, 150)}';
+      if (response.statusCode != 404 && response.statusCode != 405) {
+        throw Exception(lastError);
+      }
+    }
+
+    throw Exception(lastError);
+  }
+
+  static Future<_CandidateList> _waitForCandidates({
+    required http.Client client,
+    required String baseUrl,
+    required String apiPrefix,
+    required String endpoint,
+    required String eventId,
+    required bool withTexture,
+  }) async {
+    final uri = Uri.parse('$baseUrl$apiPrefix/call$endpoint/$eventId');
     final request = http.Request('GET', uri);
-    request.headers.addAll(_browserHeaders);
+    request.headers.addAll(_headersFor(baseUrl));
     request.headers['Accept'] = 'text/event-stream';
 
-    final response = await client.send(request).timeout(
-      const Duration(minutes: 4),
-    );
+    final timeout =
+        withTexture ? const Duration(minutes: 6) : const Duration(minutes: 4);
+
+    final response = await client.send(request).timeout(timeout);
 
     if (response.statusCode != 200) {
       throw Exception('Failed to read AI result (${response.statusCode})');
@@ -149,7 +299,7 @@ class Ai3dService {
         .transform(utf8.decoder)
         .transform(const LineSplitter());
 
-    await for (final line in lines.timeout(const Duration(minutes: 4))) {
+    await for (final line in lines.timeout(timeout)) {
       if (line.startsWith('event:')) {
         currentEvent = line.substring(6).trim();
       } else if (line.startsWith('data:')) {
@@ -158,7 +308,7 @@ class Ai3dService {
         if (currentEvent == 'error') {
           if (dataStr.toLowerCase().contains('quota')) {
             throw Exception(
-              'Free AI server quota limit reached. Please try again later.',
+              'Free GPU quota limit reached. Try Fast mode or try again later.',
             );
           }
           throw Exception(
@@ -168,9 +318,14 @@ class Ai3dService {
 
         if (currentEvent == 'complete') {
           final decoded = jsonDecode(dataStr);
-          final candidates = _extractCandidates(decoded, apiPrefix);
+          final candidates = _extractCandidates(
+            decoded,
+            baseUrl,
+            apiPrefix,
+            withTexture,
+          );
           if (candidates.isNotEmpty) {
-            return candidates;
+            return _CandidateList(candidates);
           }
           throw Exception(
             '3D model link not found. Response: ${_truncate(dataStr, 200)}',
@@ -182,7 +337,12 @@ class Ai3dService {
     throw Exception('Connection closed before 3D model finished.');
   }
 
-  static List<String> _extractCandidates(dynamic decoded, String apiPrefix) {
+  static List<String> _extractCandidates(
+    dynamic decoded,
+    String baseUrl,
+    String apiPrefix,
+    bool withTexture,
+  ) {
     final List<String> urls = [];
 
     void addUnique(String url) {
@@ -201,48 +361,46 @@ class Ai3dService {
       }
 
       if (value.startsWith('/static/')) {
-        addUnique('$_baseUrl${Uri.encodeFull(value)}');
+        addUnique('$baseUrl${Uri.encodeFull(value)}');
       } else if (value.startsWith('static/')) {
-        addUnique('$_baseUrl/${Uri.encodeFull(value)}');
+        addUnique('$baseUrl/${Uri.encodeFull(value)}');
       }
 
       if (value.startsWith('http://') || value.startsWith('https://')) {
-        final fixed = value.replaceFirst(
-          'http://frogleo-image-to-3d.hf.space',
-          _baseUrl,
-        );
+        final httpBase = baseUrl.replaceFirst('https://', 'http://');
+        final fixed = value.replaceFirst(httpBase, baseUrl);
         if (fixed.contains('/file=/static/')) {
           addUnique(fixed.replaceFirst('/file=/static/', '/static/'));
         }
         addUnique(fixed);
-        if (fixed.contains('$_baseUrl/file=') &&
+        if (fixed.contains('$baseUrl/file=') &&
             !fixed.contains('/gradio_api/file=')) {
           addUnique(
-            fixed.replaceFirst('$_baseUrl/file=', '$_baseUrl/gradio_api/file='),
+            fixed.replaceFirst('$baseUrl/file=', '$baseUrl/gradio_api/file='),
           );
-        } else if (fixed.contains('$_baseUrl/gradio_api/file=')) {
+        } else if (fixed.contains('$baseUrl/gradio_api/file=')) {
           addUnique(
-            fixed.replaceFirst('$_baseUrl/gradio_api/file=', '$_baseUrl/file='),
+            fixed.replaceFirst('$baseUrl/gradio_api/file=', '$baseUrl/file='),
           );
         }
         return;
       }
 
       if (value.startsWith('/gradio_api/file=') || value.startsWith('/file=')) {
-        addCandidate('$_baseUrl$value');
+        addCandidate('$baseUrl$value');
         return;
       }
 
       if (value.startsWith('gradio_api/file=') || value.startsWith('file=')) {
-        addCandidate('$_baseUrl/$value');
+        addCandidate('$baseUrl/$value');
         return;
       }
 
       final cleaned = value.startsWith('./') ? value.substring(2) : value;
       final encoded = Uri.encodeFull(cleaned);
-      addUnique('$_baseUrl$apiPrefix/file=$encoded');
-      addUnique('$_baseUrl/gradio_api/file=$encoded');
-      addUnique('$_baseUrl/file=$encoded');
+      addUnique('$baseUrl$apiPrefix/file=$encoded');
+      addUnique('$baseUrl/gradio_api/file=$encoded');
+      addUnique('$baseUrl/file=$encoded');
     }
 
     void collectFromItem(dynamic item) {
@@ -289,34 +447,38 @@ class Ai3dService {
     }
 
     if (decoded is List) {
-      if (decoded.length > 2) collectFromItem(decoded[2]);
-      if (decoded.isNotEmpty) collectFromItem(decoded[0]);
-      if (decoded.length > 1) collectFromItem(decoded[1]);
-      if (decoded.length > 3) collectFromItem(decoded[3]);
+      if (withTexture) {
+        // /generation_all returns [0]=white, [1]=textured, [2]=html
+        if (decoded.length > 1) collectFromItem(decoded[1]);
+        if (decoded.length > 2) collectFromItem(decoded[2]);
+        if (decoded.isNotEmpty) collectFromItem(decoded[0]);
+      } else {
+        // /gen_shape returns [0]=html, [1]=download, [2]=glbPath, [3]=objPath
+        if (decoded.length > 2) collectFromItem(decoded[2]);
+        if (decoded.isNotEmpty) collectFromItem(decoded[0]);
+        if (decoded.length > 1) collectFromItem(decoded[1]);
+        if (decoded.length > 3) collectFromItem(decoded[3]);
+      }
     } else {
       collectFromItem(decoded);
     }
 
-    final List<String> directStaticGlb = [];
-    final List<String> otherGlb = [];
+    final List<String> glbUrls = [];
     final List<String> objUrls = [];
     final List<String> others = [];
 
     for (final u in urls) {
       final lower = u.toLowerCase();
-      if (lower.contains('/static/') &&
-          !lower.contains('/file=') &&
-          lower.contains('.glb')) {
-        directStaticGlb.add(u);
-      } else if (lower.contains('.glb') || lower.startsWith('data:')) {
-        otherGlb.add(u);
+      if (lower.contains('.glb') || lower.startsWith('data:')) {
+        glbUrls.add(u);
       } else if (lower.contains('.obj')) {
         objUrls.add(u);
       } else {
         others.add(u);
       }
     }
-    return [...directStaticGlb, ...otherGlb, ...objUrls, ...others];
+
+    return [...glbUrls, ...objUrls, ...others];
   }
 
   static List<int>? _extractValidGlbBytes(List<int> raw) {
@@ -341,10 +503,12 @@ class Ai3dService {
   }
 
   static Future<String> _downloadFirstValid3dModel(
+    String baseUrl,
     List<String> candidates,
     void Function(String status)? onStatus,
   ) async {
     final List<String> attemptLogs = [];
+    final headers = _headersFor(baseUrl);
 
     for (final url in candidates) {
       try {
@@ -361,8 +525,8 @@ class Ai3dService {
         }
 
         final response = await http
-            .get(Uri.parse(url), headers: _browserHeaders)
-            .timeout(const Duration(minutes: 2));
+            .get(Uri.parse(url), headers: headers)
+            .timeout(const Duration(minutes: 3));
 
         if (response.statusCode == 200 && response.bodyBytes.isNotEmpty) {
           final validGlb = _extractValidGlbBytes(response.bodyBytes);
@@ -380,13 +544,15 @@ class Ai3dService {
           }
 
           attemptLogs.add(
-            'Unsupported (${response.bodyBytes.length}B) ${_shortUrl(url)}',
+            'Unsupported (${response.bodyBytes.length}B) ${_shortUrl(baseUrl, url)}',
           );
         } else {
-          attemptLogs.add('HTTP ${response.statusCode} ${_shortUrl(url)}');
+          attemptLogs.add(
+            'HTTP ${response.statusCode} ${_shortUrl(baseUrl, url)}',
+          );
         }
       } catch (e) {
-        attemptLogs.add('ERR ${_shortUrl(url)}: $e');
+        attemptLogs.add('ERR ${_shortUrl(baseUrl, url)}: $e');
       }
     }
 
@@ -489,175 +655,3 @@ class Ai3dService {
       normals[i0] += nx;
       normals[i0 + 1] += ny;
       normals[i0 + 2] += nz;
-
-      normals[i1] += nx;
-      normals[i1 + 1] += ny;
-      normals[i1 + 2] += nz;
-
-      normals[i2] += nx;
-      normals[i2 + 1] += ny;
-      normals[i2 + 2] += nz;
-    }
-
-    for (int i = 0; i < normals.length; i += 3) {
-      final nx = normals[i];
-      final ny = normals[i + 1];
-      final nz = normals[i + 2];
-      final len = math.sqrt(nx * nx + ny * ny + nz * nz);
-      if (len > 1e-8) {
-        normals[i] = nx / len;
-        normals[i + 1] = ny / len;
-        normals[i + 2] = nz / len;
-      } else {
-        normals[i] = 0.0;
-        normals[i + 1] = 1.0;
-        normals[i + 2] = 0.0;
-      }
-    }
-
-    final posByteLen = positions.length * 4;
-    final normByteLen = normals.length * 4;
-    final idxByteLen = indices.length * 4;
-    final binLength = posByteLen + normByteLen + idxByteLen;
-
-    final binData = ByteData(binLength);
-    int offset = 0;
-    for (int i = 0; i < positions.length; i++) {
-      binData.setFloat32(offset, positions[i], Endian.little);
-      offset += 4;
-    }
-    for (int i = 0; i < normals.length; i++) {
-      binData.setFloat32(offset, normals[i], Endian.little);
-      offset += 4;
-    }
-    for (int i = 0; i < indices.length; i++) {
-      binData.setUint32(offset, indices[i], Endian.little);
-      offset += 4;
-    }
-
-    final gltf = {
-      'asset': {'version': '2.0', 'generator': 'My3D AI Studio'},
-      'scene': 0,
-      'scenes': [
-        {
-          'nodes': [0]
-        }
-      ],
-      'nodes': [
-        {'mesh': 0}
-      ],
-      'materials': [
-        {
-          'pbrMetallicRoughness': {
-            'baseColorFactor': [0.85, 0.85, 0.88, 1.0],
-            'metallicFactor': 0.1,
-            'roughnessFactor': 0.7,
-          },
-          'doubleSided': true,
-        }
-      ],
-      'meshes': [
-        {
-          'primitives': [
-            {
-              'attributes': {'POSITION': 0, 'NORMAL': 1},
-              'indices': 2,
-              'material': 0,
-            }
-          ]
-        }
-      ],
-      'buffers': [
-        {'byteLength': binLength}
-      ],
-      'bufferViews': [
-        {
-          'buffer': 0,
-          'byteOffset': 0,
-          'byteLength': posByteLen,
-          'target': 34962,
-        },
-        {
-          'buffer': 0,
-          'byteOffset': posByteLen,
-          'byteLength': normByteLen,
-          'target': 34962,
-        },
-        {
-          'buffer': 0,
-          'byteOffset': posByteLen + normByteLen,
-          'byteLength': idxByteLen,
-          'target': 34963,
-        },
-      ],
-      'accessors': [
-        {
-          'bufferView': 0,
-          'componentType': 5126,
-          'count': vertexCount,
-          'type': 'VEC3',
-          'min': [minX, minY, minZ],
-          'max': [maxX, maxY, maxZ],
-        },
-        {
-          'bufferView': 1,
-          'componentType': 5126,
-          'count': vertexCount,
-          'type': 'VEC3',
-        },
-        {
-          'bufferView': 2,
-          'componentType': 5125,
-          'count': indices.length,
-          'type': 'SCALAR',
-        },
-      ],
-    };
-
-    final jsonBytesRaw = utf8.encode(jsonEncode(gltf));
-    final jsonPad = (4 - (jsonBytesRaw.length % 4)) % 4;
-    final jsonChunkLen = jsonBytesRaw.length + jsonPad;
-    final totalLength = 12 + 8 + jsonChunkLen + 8 + binLength;
-
-    final glbBytes = Uint8List(totalLength);
-    final header = ByteData.sublistView(glbBytes);
-    header.setUint32(0, 0x46546C67, Endian.little);
-    header.setUint32(4, 2, Endian.little);
-    header.setUint32(8, totalLength, Endian.little);
-
-    header.setUint32(12, jsonChunkLen, Endian.little);
-    header.setUint32(16, 0x4E4F534A, Endian.little);
-    glbBytes.setRange(20, 20 + jsonBytesRaw.length, jsonBytesRaw);
-    for (int i = 0; i < jsonPad; i++) {
-      glbBytes[20 + jsonBytesRaw.length + i] = 0x20;
-    }
-
-    final binChunkOffset = 20 + jsonChunkLen;
-    header.setUint32(binChunkOffset, binLength, Endian.little);
-    header.setUint32(binChunkOffset + 4, 0x004E4942, Endian.little);
-    glbBytes.setRange(
-      binChunkOffset + 8,
-      binChunkOffset + 8 + binLength,
-      binData.buffer.asUint8List(),
-    );
-
-    return glbBytes;
-  }
-
-  static String _shortUrl(String url) {
-    return url.replaceFirst(_baseUrl, '');
-  }
-
-  static Future<String> _saveGlbBytes(List<int> bytes) async {
-    final dir = await getTemporaryDirectory();
-    final timestamp = DateTime.now().millisecondsSinceEpoch;
-    final file = File('${dir.path}/my3d_$timestamp.glb');
-    await file.writeAsBytes(bytes);
-    return file.path;
-  }
-
-  static String _truncate(String text, int maxLength) {
-    if (text.length <= maxLength) return text;
-    return '${text.substring(0, maxLength)}...';
-  }
-}
