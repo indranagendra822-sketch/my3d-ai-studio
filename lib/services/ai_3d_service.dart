@@ -45,7 +45,7 @@ class Ai3dService {
       );
 
       onStatus?.call('Downloading 3D model (.glb)...');
-      final localPath = await _downloadFirstWorkingGlb(candidates);
+      final localPath = await _downloadFirstValidGlb(candidates);
       return localPath;
     } finally {
       client.close();
@@ -222,6 +222,11 @@ class Ai3dService {
         return;
       }
 
+      if (value.startsWith('gradio_api/file=') || value.startsWith('file=')) {
+        addCandidate('$_baseUrl/$value');
+        return;
+      }
+
       final cleaned = value.startsWith('./') ? value.substring(2) : value;
       final encoded = Uri.encodeFull(cleaned);
       addUnique('$_baseUrl$apiPrefix/file=$encoded');
@@ -234,11 +239,20 @@ class Ai3dService {
 
       if (item is String) {
         if (item.contains('<')) {
-          final regex = RegExp(
-            r'''(https?:\/\/[^\s"'<>]+\.glb[^\s"'<>]*|\/(?:gradio_api\/)?file=[^\s"'<>]+\.glb[^\s"'<>]*)''',
+          final dataUriRegex = RegExp(
+            r'''data:[^"'\s<>]+;base64,[A-Za-z0-9+/=]+''',
             caseSensitive: false,
           );
-          for (final match in regex.allMatches(item)) {
+          for (final match in dataUriRegex.allMatches(item)) {
+            final found = match.group(0);
+            if (found != null) addCandidate(found);
+          }
+
+          final urlRegex = RegExp(
+            r'''(https?:\/\/[^\s"'<>]+\.glb[^\s"'<>]*|\/?(?:gradio_api\/)?file=[^\s"'<>]+\.glb[^\s"'<>]*)''',
+            caseSensitive: false,
+          );
+          for (final match in urlRegex.allMatches(item)) {
             final found = match.group(0);
             if (found != null) addCandidate(found);
           }
@@ -264,20 +278,51 @@ class Ai3dService {
     }
 
     if (decoded is List) {
-      if (decoded.length > 1) collectFromItem(decoded[1]);
-      if (decoded.isNotEmpty) collectFromItem(decoded[0]);
       if (decoded.length > 2) collectFromItem(decoded[2]);
+      if (decoded.isNotEmpty) collectFromItem(decoded[0]);
+      if (decoded.length > 1) collectFromItem(decoded[1]);
     } else {
       collectFromItem(decoded);
     }
 
-    return urls;
+    final List<String> glbFirst = [];
+    final List<String> others = [];
+    for (final u in urls) {
+      final lower = u.toLowerCase();
+      if (lower.contains('.glb') || lower.startsWith('data:')) {
+        glbFirst.add(u);
+      } else {
+        others.add(u);
+      }
+    }
+    return [...glbFirst, ...others];
   }
 
-  static Future<String> _downloadFirstWorkingGlb(
+  static List<int>? _extractValidGlbBytes(List<int> raw) {
+    if (_hasGlbHeader(raw)) return raw;
+
+    if (raw.length >= 2 && raw[0] == 0x1F && raw[1] == 0x8B) {
+      try {
+        final unzipped = gzip.decode(raw);
+        if (_hasGlbHeader(unzipped)) return unzipped;
+      } catch (_) {}
+    }
+
+    return null;
+  }
+
+  static bool _hasGlbHeader(List<int> bytes) {
+    return bytes.length >= 12 &&
+        bytes[0] == 0x67 &&
+        bytes[1] == 0x6C &&
+        bytes[2] == 0x54 &&
+        bytes[3] == 0x46;
+  }
+
+  static Future<String> _downloadFirstValidGlb(
     List<String> candidates,
   ) async {
-    String lastError = 'No download URL available';
+    final List<String> attemptLogs = [];
 
     for (final url in candidates) {
       try {
@@ -285,9 +330,13 @@ class Ai3dService {
           final commaIndex = url.indexOf(',');
           if (commaIndex != -1) {
             final bytes = base64Decode(url.substring(commaIndex + 1));
-            if (bytes.isNotEmpty) {
-              return _saveGlbBytes(bytes);
+            final validGlb = _extractValidGlbBytes(bytes);
+            if (validGlb != null) {
+              return _saveGlbBytes(validGlb);
             }
+            attemptLogs.add(
+              'dataURI (${bytes.length}B): ${_bytesPreview(bytes)}',
+            );
           }
           continue;
         }
@@ -297,27 +346,41 @@ class Ai3dService {
             .timeout(const Duration(minutes: 2));
 
         if (response.statusCode == 200 && response.bodyBytes.isNotEmpty) {
-          final headerText = utf8
-              .decode(
-                response.bodyBytes.take(24).toList(),
-                allowMalformed: true,
-              )
-              .trimLeft();
-
-          if (!headerText.startsWith('<')) {
-            return _saveGlbBytes(response.bodyBytes);
+          final validGlb = _extractValidGlbBytes(response.bodyBytes);
+          if (validGlb != null) {
+            return _saveGlbBytes(validGlb);
           }
-          lastError = 'Server returned HTML instead of GLB for $url';
+          attemptLogs.add(
+            'Not GLB (${response.bodyBytes.length}B) ${_shortUrl(url)} -> ${_bytesPreview(response.bodyBytes)}',
+          );
         } else {
-          lastError =
-              'HTTP ${response.statusCode} for $url (${_truncate(response.body, 100)})';
+          attemptLogs.add('HTTP ${response.statusCode} ${_shortUrl(url)}');
         }
       } catch (e) {
-        lastError = e.toString();
+        attemptLogs.add('ERR ${_shortUrl(url)}: $e');
       }
     }
 
-    throw Exception('Failed to download 3D file: $lastError');
+    final details = attemptLogs.isEmpty
+        ? 'No candidate URLs'
+        : attemptLogs.take(4).join('\n');
+    throw Exception('Valid GLB not found.\n$details');
+  }
+
+  static String _bytesPreview(List<int> bytes) {
+    final sample = bytes.take(16).toList();
+    final ascii = sample
+        .map((b) => (b >= 32 && b <= 126) ? String.fromCharCode(b) : '.')
+        .join();
+    final hex = sample
+        .take(6)
+        .map((b) => b.toRadixString(16).padLeft(2, '0'))
+        .join(' ');
+    return '"$ascii" [$hex]';
+  }
+
+  static String _shortUrl(String url) {
+    return url.replaceFirst(_baseUrl, '');
   }
 
   static Future<String> _saveGlbBytes(List<int> bytes) async {
