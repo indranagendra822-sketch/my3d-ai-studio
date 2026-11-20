@@ -14,6 +14,14 @@ class _UploadResult {
 class Ai3dService {
   static const String _baseUrl = 'https://frogleo-image-to-3d.hf.space';
 
+  static const Map<String, String> _browserHeaders = {
+    'User-Agent':
+        'Mozilla/5.0 (Linux; Android 14) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126.0.0.0 Mobile Safari/537.36',
+    'Referer': '$_baseUrl/',
+    'Origin': _baseUrl,
+    'Accept': '*/*',
+  };
+
   static Future<String> generate3DModel({
     required File imageFile,
     void Function(String status)? onStatus,
@@ -30,14 +38,14 @@ class Ai3dService {
       );
 
       onStatus?.call('AI is building your 3D model (30-90 sec)...');
-      final glbUrl = await _waitForResult(
+      final candidates = await _waitForCandidates(
         client: client,
         eventId: eventId,
         apiPrefix: uploadResult.prefix,
       );
 
       onStatus?.call('Downloading 3D model (.glb)...');
-      final localPath = await _downloadGlb(glbUrl);
+      final localPath = await _downloadFirstWorkingGlb(candidates);
       return localPath;
     } finally {
       client.close();
@@ -48,6 +56,7 @@ class Ai3dService {
     for (final prefix in ['', '/gradio_api']) {
       final uri = Uri.parse('$_baseUrl$prefix/upload');
       final request = http.MultipartRequest('POST', uri);
+      request.headers.addAll(_browserHeaders);
       request.files.add(
         await http.MultipartFile.fromPath('files', imageFile.path),
       );
@@ -91,17 +100,20 @@ class Ai3dService {
       ],
     };
 
+    final headers = Map<String, String>.from(_browserHeaders);
+    headers['Content-Type'] = 'application/json';
+
     final response = await http
         .post(
           uri,
-          headers: {'Content-Type': 'application/json'},
+          headers: headers,
           body: jsonEncode(payload),
         )
         .timeout(const Duration(seconds: 60));
 
     if (response.statusCode != 200) {
       throw Exception(
-        'AI server error (${response.statusCode}): ${response.body}',
+        'AI server error (${response.statusCode}): ${_truncate(response.body, 150)}',
       );
     }
 
@@ -112,13 +124,14 @@ class Ai3dService {
     throw Exception('Invalid response from AI server.');
   }
 
-  static Future<String> _waitForResult({
+  static Future<List<String>> _waitForCandidates({
     required http.Client client,
     required String eventId,
     required String apiPrefix,
   }) async {
     final uri = Uri.parse('$_baseUrl$apiPrefix/call/gen_shape/$eventId');
     final request = http.Request('GET', uri);
+    request.headers.addAll(_browserHeaders);
     request.headers['Accept'] = 'text/event-stream';
 
     final response = await client.send(request).timeout(
@@ -147,17 +160,19 @@ class Ai3dService {
             );
           }
           throw Exception(
-            'AI generation failed: ${dataStr.isEmpty ? "Server busy" : dataStr}',
+            'AI generation failed: ${dataStr.isEmpty ? "Server busy" : _truncate(dataStr, 180)}',
           );
         }
 
         if (currentEvent == 'complete') {
           final decoded = jsonDecode(dataStr);
-          final glbUrl = _extractGlbUrl(decoded, apiPrefix);
-          if (glbUrl != null) {
-            return glbUrl;
+          final candidates = _extractCandidates(decoded, apiPrefix);
+          if (candidates.isNotEmpty) {
+            return candidates;
           }
-          throw Exception('3D model file not found in AI response.');
+          throw Exception(
+            '3D model link not found. Response: ${_truncate(dataStr, 200)}',
+          );
         }
       }
     }
@@ -165,56 +180,156 @@ class Ai3dService {
     throw Exception('Connection closed before 3D model finished.');
   }
 
-  static String? _extractGlbUrl(dynamic decoded, String apiPrefix) {
-    if (decoded is! List) return null;
+  static List<String> _extractCandidates(dynamic decoded, String apiPrefix) {
+    final List<String> urls = [];
 
-    if (decoded.length > 1) {
-      final downloadItem = decoded[1];
-      if (downloadItem is Map) {
-        final url = downloadItem['url']?.toString();
-        if (url != null && url.startsWith('http')) {
-          return url;
-        }
-        final path = downloadItem['path']?.toString();
-        if (path != null && path.isNotEmpty) {
-          return _buildFileUrl(path, apiPrefix);
-        }
-      } else if (downloadItem is String && downloadItem.isNotEmpty) {
-        return _buildFileUrl(downloadItem, apiPrefix);
+    void addUnique(String url) {
+      if (url.isNotEmpty && !urls.contains(url)) {
+        urls.add(url);
       }
     }
 
-    if (decoded.length > 2) {
-      final glbPath = decoded[2]?.toString();
-      if (glbPath != null && glbPath.isNotEmpty) {
-        return _buildFileUrl(glbPath, apiPrefix);
+    void addCandidate(String raw) {
+      final value = raw.trim();
+      if (value.isEmpty) return;
+
+      if (value.startsWith('data:')) {
+        addUnique(value);
+        return;
+      }
+
+      if (value.startsWith('http://') || value.startsWith('https://')) {
+        final fixed = value.replaceFirst(
+          'http://frogleo-image-to-3d.hf.space',
+          _baseUrl,
+        );
+        addUnique(fixed);
+        if (fixed.contains('$_baseUrl/file=') &&
+            !fixed.contains('/gradio_api/file=')) {
+          addUnique(
+            fixed.replaceFirst('$_baseUrl/file=', '$_baseUrl/gradio_api/file='),
+          );
+        } else if (fixed.contains('$_baseUrl/gradio_api/file=')) {
+          addUnique(
+            fixed.replaceFirst('$_baseUrl/gradio_api/file=', '$_baseUrl/file='),
+          );
+        }
+        return;
+      }
+
+      if (value.startsWith('/gradio_api/file=') || value.startsWith('/file=')) {
+        addCandidate('$_baseUrl$value');
+        return;
+      }
+
+      final cleaned = value.startsWith('./') ? value.substring(2) : value;
+      final encoded = Uri.encodeFull(cleaned);
+      addUnique('$_baseUrl$apiPrefix/file=$encoded');
+      addUnique('$_baseUrl/gradio_api/file=$encoded');
+      addUnique('$_baseUrl/file=$encoded');
+    }
+
+    void collectFromItem(dynamic item) {
+      if (item == null) return;
+
+      if (item is String) {
+        if (item.contains('<')) {
+          final regex = RegExp(
+            r'''(https?:\/\/[^\s"'<>]+\.glb[^\s"'<>]*|\/(?:gradio_api\/)?file=[^\s"'<>]+\.glb[^\s"'<>]*)''',
+            caseSensitive: false,
+          );
+          for (final match in regex.allMatches(item)) {
+            final found = match.group(0);
+            if (found != null) addCandidate(found);
+          }
+        } else {
+          addCandidate(item);
+        }
+        return;
+      }
+
+      if (item is Map) {
+        collectFromItem(item['url']);
+        collectFromItem(item['value']);
+        collectFromItem(item['path']);
+        collectFromItem(item['name']);
+        return;
+      }
+
+      if (item is List) {
+        for (final element in item) {
+          collectFromItem(element);
+        }
       }
     }
 
-    return null;
-  }
-
-  static String _buildFileUrl(String pathOrUrl, String apiPrefix) {
-    if (pathOrUrl.startsWith('http')) return pathOrUrl;
-    final encoded = Uri.encodeFull(pathOrUrl);
-    return '$_baseUrl$apiPrefix/file=$encoded';
-  }
-
-  static Future<String> _downloadGlb(String url) async {
-    final response = await http
-        .get(Uri.parse(url))
-        .timeout(const Duration(minutes: 2));
-
-    if (response.statusCode != 200 || response.bodyBytes.isEmpty) {
-      throw Exception(
-        'Failed to download 3D file (${response.statusCode})',
-      );
+    if (decoded is List) {
+      if (decoded.length > 1) collectFromItem(decoded[1]);
+      if (decoded.isNotEmpty) collectFromItem(decoded[0]);
+      if (decoded.length > 2) collectFromItem(decoded[2]);
+    } else {
+      collectFromItem(decoded);
     }
 
+    return urls;
+  }
+
+  static Future<String> _downloadFirstWorkingGlb(
+    List<String> candidates,
+  ) async {
+    String lastError = 'No download URL available';
+
+    for (final url in candidates) {
+      try {
+        if (url.startsWith('data:')) {
+          final commaIndex = url.indexOf(',');
+          if (commaIndex != -1) {
+            final bytes = base64Decode(url.substring(commaIndex + 1));
+            if (bytes.isNotEmpty) {
+              return _saveGlbBytes(bytes);
+            }
+          }
+          continue;
+        }
+
+        final response = await http
+            .get(Uri.parse(url), headers: _browserHeaders)
+            .timeout(const Duration(minutes: 2));
+
+        if (response.statusCode == 200 && response.bodyBytes.isNotEmpty) {
+          final headerText = utf8
+              .decode(
+                response.bodyBytes.take(24).toList(),
+                allowMalformed: true,
+              )
+              .trimLeft();
+
+          if (!headerText.startsWith('<')) {
+            return _saveGlbBytes(response.bodyBytes);
+          }
+          lastError = 'Server returned HTML instead of GLB for $url';
+        } else {
+          lastError =
+              'HTTP ${response.statusCode} for $url (${_truncate(response.body, 100)})';
+        }
+      } catch (e) {
+        lastError = e.toString();
+      }
+    }
+
+    throw Exception('Failed to download 3D file: $lastError');
+  }
+
+  static Future<String> _saveGlbBytes(List<int> bytes) async {
     final dir = await getTemporaryDirectory();
     final timestamp = DateTime.now().millisecondsSinceEpoch;
     final file = File('${dir.path}/my3d_$timestamp.glb');
-    await file.writeAsBytes(response.bodyBytes);
+    await file.writeAsBytes(bytes);
     return file.path;
+  }
+
+  static String _truncate(String text, int maxLength) {
+    if (text.length <= maxLength) return text;
+    return '${text.substring(0, maxLength)}...';
   }
 }
