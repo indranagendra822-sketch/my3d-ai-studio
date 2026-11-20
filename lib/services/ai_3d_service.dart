@@ -1,6 +1,8 @@
 import 'dart:async';
 import 'dart:convert';
 import 'dart:io';
+import 'dart:math' as math;
+import 'dart:typed_data';
 import 'package:http/http.dart' as http;
 import 'package:path_provider/path_provider.dart';
 
@@ -44,8 +46,8 @@ class Ai3dService {
         apiPrefix: uploadResult.prefix,
       );
 
-      onStatus?.call('Downloading 3D model (.glb)...');
-      final localPath = await _downloadFirstValidGlb(candidates);
+      onStatus?.call('Downloading 3D model...');
+      final localPath = await _downloadFirstValid3dModel(candidates, onStatus);
       return localPath;
     } finally {
       client.close();
@@ -198,11 +200,20 @@ class Ai3dService {
         return;
       }
 
+      if (value.startsWith('/static/')) {
+        addUnique('$_baseUrl${Uri.encodeFull(value)}');
+      } else if (value.startsWith('static/')) {
+        addUnique('$_baseUrl/${Uri.encodeFull(value)}');
+      }
+
       if (value.startsWith('http://') || value.startsWith('https://')) {
         final fixed = value.replaceFirst(
           'http://frogleo-image-to-3d.hf.space',
           _baseUrl,
         );
+        if (fixed.contains('/file=/static/')) {
+          addUnique(fixed.replaceFirst('/file=/static/', '/static/'));
+        }
         addUnique(fixed);
         if (fixed.contains('$_baseUrl/file=') &&
             !fixed.contains('/gradio_api/file=')) {
@@ -249,7 +260,7 @@ class Ai3dService {
           }
 
           final urlRegex = RegExp(
-            r'''(https?:\/\/[^\s"'<>]+\.glb[^\s"'<>]*|\/?(?:gradio_api\/)?file=[^\s"'<>]+\.glb[^\s"'<>]*)''',
+            r'''(https?:\/\/[^\s"'<>]+\.(?:glb|obj)[^\s"'<>]*|\/?static\/[^\s"'<>]+\.(?:glb|obj)[^\s"'<>]*|\/?(?:gradio_api\/)?file=[^\s"'<>]+\.(?:glb|obj)[^\s"'<>]*)''',
             caseSensitive: false,
           );
           for (final match in urlRegex.allMatches(item)) {
@@ -281,21 +292,31 @@ class Ai3dService {
       if (decoded.length > 2) collectFromItem(decoded[2]);
       if (decoded.isNotEmpty) collectFromItem(decoded[0]);
       if (decoded.length > 1) collectFromItem(decoded[1]);
+      if (decoded.length > 3) collectFromItem(decoded[3]);
     } else {
       collectFromItem(decoded);
     }
 
-    final List<String> glbFirst = [];
+    final List<String> directStaticGlb = [];
+    final List<String> otherGlb = [];
+    final List<String> objUrls = [];
     final List<String> others = [];
+
     for (final u in urls) {
       final lower = u.toLowerCase();
-      if (lower.contains('.glb') || lower.startsWith('data:')) {
-        glbFirst.add(u);
+      if (lower.contains('/static/') &&
+          !lower.contains('/file=') &&
+          lower.contains('.glb')) {
+        directStaticGlb.add(u);
+      } else if (lower.contains('.glb') || lower.startsWith('data:')) {
+        otherGlb.add(u);
+      } else if (lower.contains('.obj')) {
+        objUrls.add(u);
       } else {
         others.add(u);
       }
     }
-    return [...glbFirst, ...others];
+    return [...directStaticGlb, ...otherGlb, ...objUrls, ...others];
   }
 
   static List<int>? _extractValidGlbBytes(List<int> raw) {
@@ -319,8 +340,9 @@ class Ai3dService {
         bytes[3] == 0x46;
   }
 
-  static Future<String> _downloadFirstValidGlb(
+  static Future<String> _downloadFirstValid3dModel(
     List<String> candidates,
+    void Function(String status)? onStatus,
   ) async {
     final List<String> attemptLogs = [];
 
@@ -334,9 +356,6 @@ class Ai3dService {
             if (validGlb != null) {
               return _saveGlbBytes(validGlb);
             }
-            attemptLogs.add(
-              'dataURI (${bytes.length}B): ${_bytesPreview(bytes)}',
-            );
           }
           continue;
         }
@@ -350,8 +369,18 @@ class Ai3dService {
           if (validGlb != null) {
             return _saveGlbBytes(validGlb);
           }
+
+          final text = utf8.decode(response.bodyBytes, allowMalformed: true);
+          if (_looksLikeObj(text)) {
+            onStatus?.call('Converting 3D mesh to GLB...');
+            final converted = _convertObjToGlb(text);
+            if (converted != null) {
+              return _saveGlbBytes(converted);
+            }
+          }
+
           attemptLogs.add(
-            'Not GLB (${response.bodyBytes.length}B) ${_shortUrl(url)} -> ${_bytesPreview(response.bodyBytes)}',
+            'Unsupported (${response.bodyBytes.length}B) ${_shortUrl(url)}',
           );
         } else {
           attemptLogs.add('HTTP ${response.statusCode} ${_shortUrl(url)}');
@@ -362,21 +391,257 @@ class Ai3dService {
     }
 
     final details = attemptLogs.isEmpty
-        ? 'No candidate URLs'
+        ? 'No download URLs'
         : attemptLogs.take(4).join('\n');
-    throw Exception('Valid GLB not found.\n$details');
+    throw Exception('Could not load 3D model.\n$details');
   }
 
-  static String _bytesPreview(List<int> bytes) {
-    final sample = bytes.take(16).toList();
-    final ascii = sample
-        .map((b) => (b >= 32 && b <= 126) ? String.fromCharCode(b) : '.')
-        .join();
-    final hex = sample
-        .take(6)
-        .map((b) => b.toRadixString(16).padLeft(2, '0'))
-        .join(' ');
-    return '"$ascii" [$hex]';
+  static bool _looksLikeObj(String text) {
+    return RegExp(r'^v\s+-?\d', multiLine: true).hasMatch(text) &&
+        RegExp(r'^f\s+\d', multiLine: true).hasMatch(text);
+  }
+
+  static Uint8List? _convertObjToGlb(String objText) {
+    final List<double> posList = [];
+    final List<int> idxList = [];
+
+    for (final rawLine in const LineSplitter().convert(objText)) {
+      final line = rawLine.trim();
+      if (line.isEmpty || line.startsWith('#')) continue;
+
+      if (line.startsWith('v ')) {
+        final parts = line.split(RegExp(r'\s+'));
+        if (parts.length >= 4) {
+          final x = double.tryParse(parts[1]);
+          final y = double.tryParse(parts[2]);
+          final z = double.tryParse(parts[3]);
+          if (x != null && y != null && z != null) {
+            posList.add(x);
+            posList.add(y);
+            posList.add(z);
+          }
+        }
+      } else if (line.startsWith('f ')) {
+        final parts = line.split(RegExp(r'\s+'));
+        final vertexCount = posList.length ~/ 3;
+        final List<int> faceIndices = [];
+
+        for (int i = 1; i < parts.length; i++) {
+          final token = parts[i].split('/')[0];
+          final parsed = int.tryParse(token);
+          if (parsed == null) continue;
+          final idx = parsed > 0 ? parsed - 1 : vertexCount + parsed;
+          if (idx >= 0 && idx < vertexCount) {
+            faceIndices.add(idx);
+          }
+        }
+
+        if (faceIndices.length >= 3) {
+          for (int i = 1; i < faceIndices.length - 1; i++) {
+            idxList.add(faceIndices[0]);
+            idxList.add(faceIndices[i]);
+            idxList.add(faceIndices[i + 1]);
+          }
+        }
+      }
+    }
+
+    final vertexCount = posList.length ~/ 3;
+    if (vertexCount < 3 || idxList.length < 3) return null;
+
+    double minX = posList[0], maxX = posList[0];
+    double minY = posList[1], maxY = posList[1];
+    double minZ = posList[2], maxZ = posList[2];
+
+    for (int i = 0; i < posList.length; i += 3) {
+      final x = posList[i];
+      final y = posList[i + 1];
+      final z = posList[i + 2];
+      if (x < minX) minX = x;
+      if (x > maxX) maxX = x;
+      if (y < minY) minY = y;
+      if (y > maxY) maxY = y;
+      if (z < minZ) minZ = z;
+      if (z > maxZ) maxZ = z;
+    }
+
+    final positions = Float32List.fromList(posList);
+    final normals = Float32List(posList.length);
+    final indices = Uint32List.fromList(idxList);
+
+    for (int i = 0; i < indices.length; i += 3) {
+      final i0 = indices[i] * 3;
+      final i1 = indices[i + 1] * 3;
+      final i2 = indices[i + 2] * 3;
+
+      final ax = positions[i1] - positions[i0];
+      final ay = positions[i1 + 1] - positions[i0 + 1];
+      final az = positions[i1 + 2] - positions[i0 + 2];
+
+      final bx = positions[i2] - positions[i0];
+      final by = positions[i2 + 1] - positions[i0 + 1];
+      final bz = positions[i2 + 2] - positions[i0 + 2];
+
+      final nx = ay * bz - az * by;
+      final ny = az * bx - ax * bz;
+      final nz = ax * by - ay * bx;
+
+      normals[i0] += nx;
+      normals[i0 + 1] += ny;
+      normals[i0 + 2] += nz;
+
+      normals[i1] += nx;
+      normals[i1 + 1] += ny;
+      normals[i1 + 2] += nz;
+
+      normals[i2] += nx;
+      normals[i2 + 1] += ny;
+      normals[i2 + 2] += nz;
+    }
+
+    for (int i = 0; i < normals.length; i += 3) {
+      final nx = normals[i];
+      final ny = normals[i + 1];
+      final nz = normals[i + 2];
+      final len = math.sqrt(nx * nx + ny * ny + nz * nz);
+      if (len > 1e-8) {
+        normals[i] = nx / len;
+        normals[i + 1] = ny / len;
+        normals[i + 2] = nz / len;
+      } else {
+        normals[i] = 0.0;
+        normals[i + 1] = 1.0;
+        normals[i + 2] = 0.0;
+      }
+    }
+
+    final posByteLen = positions.length * 4;
+    final normByteLen = normals.length * 4;
+    final idxByteLen = indices.length * 4;
+    final binLength = posByteLen + normByteLen + idxByteLen;
+
+    final binData = ByteData(binLength);
+    int offset = 0;
+    for (int i = 0; i < positions.length; i++) {
+      binData.setFloat32(offset, positions[i], Endian.little);
+      offset += 4;
+    }
+    for (int i = 0; i < normals.length; i++) {
+      binData.setFloat32(offset, normals[i], Endian.little);
+      offset += 4;
+    }
+    for (int i = 0; i < indices.length; i++) {
+      binData.setUint32(offset, indices[i], Endian.little);
+      offset += 4;
+    }
+
+    final gltf = {
+      'asset': {'version': '2.0', 'generator': 'My3D AI Studio'},
+      'scene': 0,
+      'scenes': [
+        {
+          'nodes': [0]
+        }
+      ],
+      'nodes': [
+        {'mesh': 0}
+      ],
+      'materials': [
+        {
+          'pbrMetallicRoughness': {
+            'baseColorFactor': [0.85, 0.85, 0.88, 1.0],
+            'metallicFactor': 0.1,
+            'roughnessFactor': 0.7,
+          },
+          'doubleSided': true,
+        }
+      ],
+      'meshes': [
+        {
+          'primitives': [
+            {
+              'attributes': {'POSITION': 0, 'NORMAL': 1},
+              'indices': 2,
+              'material': 0,
+            }
+          ]
+        }
+      ],
+      'buffers': [
+        {'byteLength': binLength}
+      ],
+      'bufferViews': [
+        {
+          'buffer': 0,
+          'byteOffset': 0,
+          'byteLength': posByteLen,
+          'target': 34962,
+        },
+        {
+          'buffer': 0,
+          'byteOffset': posByteLen,
+          'byteLength': normByteLen,
+          'target': 34962,
+        },
+        {
+          'buffer': 0,
+          'byteOffset': posByteLen + normByteLen,
+          'byteLength': idxByteLen,
+          'target': 34963,
+        },
+      ],
+      'accessors': [
+        {
+          'bufferView': 0,
+          'componentType': 5126,
+          'count': vertexCount,
+          'type': 'VEC3',
+          'min': [minX, minY, minZ],
+          'max': [maxX, maxY, maxZ],
+        },
+        {
+          'bufferView': 1,
+          'componentType': 5126,
+          'count': vertexCount,
+          'type': 'VEC3',
+        },
+        {
+          'bufferView': 2,
+          'componentType': 5125,
+          'count': indices.length,
+          'type': 'SCALAR',
+        },
+      ],
+    };
+
+    final jsonBytesRaw = utf8.encode(jsonEncode(gltf));
+    final jsonPad = (4 - (jsonBytesRaw.length % 4)) % 4;
+    final jsonChunkLen = jsonBytesRaw.length + jsonPad;
+    final totalLength = 12 + 8 + jsonChunkLen + 8 + binLength;
+
+    final glbBytes = Uint8List(totalLength);
+    final header = ByteData.sublistView(glbBytes);
+    header.setUint32(0, 0x46546C67, Endian.little);
+    header.setUint32(4, 2, Endian.little);
+    header.setUint32(8, totalLength, Endian.little);
+
+    header.setUint32(12, jsonChunkLen, Endian.little);
+    header.setUint32(16, 0x4E4F534A, Endian.little);
+    glbBytes.setRange(20, 20 + jsonBytesRaw.length, jsonBytesRaw);
+    for (int i = 0; i < jsonPad; i++) {
+      glbBytes[20 + jsonBytesRaw.length + i] = 0x20;
+    }
+
+    final binChunkOffset = 20 + jsonChunkLen;
+    header.setUint32(binChunkOffset, binLength, Endian.little);
+    header.setUint32(binChunkOffset + 4, 0x004E4942, Endian.little);
+    glbBytes.setRange(
+      binChunkOffset + 8,
+      binChunkOffset + 8 + binLength,
+      binData.buffer.asUint8List(),
+    );
+
+    return glbBytes;
   }
 
   static String _shortUrl(String url) {
