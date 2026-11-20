@@ -1,6 +1,8 @@
 import 'dart:io';
 import 'package:flutter/material.dart';
 import 'package:image_picker/image_picker.dart';
+import '../services/ai_3d_service.dart';
+import 'model_viewer_screen.dart';
 
 class HomeScreen extends StatefulWidget {
   const HomeScreen({super.key});
@@ -11,17 +13,88 @@ class HomeScreen extends StatefulWidget {
 
 class _HomeScreenState extends State<HomeScreen> {
   File? selectedImage;
+  bool isGenerating = false;
+  String statusMessage = '';
+  final ImagePicker picker = ImagePicker();
 
   Future<void> pickImage() async {
-    final picker = ImagePicker();
-    final image = await picker.pickImage(
+    if (isGenerating) return;
+    final XFile? image = await picker.pickImage(
       source: ImageSource.gallery,
+      maxWidth: 1024,
+      maxHeight: 1024,
+      imageQuality: 90,
     );
-
     if (image != null) {
       setState(() {
         selectedImage = File(image.path);
       });
+    }
+  }
+
+  Future<void> generateModel() async {
+    if (selectedImage == null || isGenerating) return;
+
+    setState(() {
+      isGenerating = true;
+      statusMessage = 'Connecting to AI server...';
+    });
+
+    try {
+      final glbPath = await Ai3dService.generate3DModel(
+        imageFile: selectedImage!,
+        onStatus: (status) {
+          if (!mounted) return;
+          setState(() {
+            statusMessage = status;
+          });
+        },
+      );
+
+      if (!mounted) return;
+
+      setState(() {
+        isGenerating = false;
+        statusMessage = '';
+      });
+
+      Navigator.push(
+        context,
+        MaterialPageRoute(
+          builder: (context) => ModelViewerScreen(
+            modelSource: glbPath,
+            isLocalFile: true,
+            modelName: 'my3d_model.glb',
+          ),
+        ),
+      );
+    } catch (e) {
+      if (!mounted) return;
+      setState(() {
+        isGenerating = false;
+        statusMessage = '';
+      });
+
+      showDialog(
+        context: context,
+        builder: (context) => AlertDialog(
+          backgroundColor: const Color(0xFF171B26),
+          title: const Text(
+            '3D Generation Failed',
+            style: TextStyle(color: Colors.white),
+          ),
+          content: Text(
+            e.toString().replaceFirst('Exception: ', ''),
+            style: const TextStyle(color: Colors.white70),
+          ),
+          actions: [
+            TextButton(
+              onPressed: () => Navigator.pop(context),
+              child: const Text('OK'),
+            ),
+          ],
+        ),
+      );
     }
   }
 
@@ -40,118 +113,171 @@ class _HomeScreenState extends State<HomeScreen> {
         ),
         centerTitle: true,
       ),
-      body: Padding(
-        padding: const EdgeInsets.all(20),
-        child: Column(
-          crossAxisAlignment: CrossAxisAlignment.start,
-          children: [
-            const Text(
-              'Create 3D Models with AI',
-              style: TextStyle(
-                color: Colors.white,
-                fontSize: 26,
-                fontWeight: FontWeight.bold,
-              ),
-            ),
-            const SizedBox(height: 10),
-            const Text(
-              'Turn your images into 3D models',
-              style: TextStyle(color: Colors.white70),
-            ),
-            const SizedBox(height: 30),
-            GestureDetector(
-              onTap: pickImage,
-              child: Container(
-                width: double.infinity,
-                height: 250,
-                decoration: BoxDecoration(
-                  color: const Color(0xFF171B26),
-                  borderRadius: BorderRadius.circular(20),
-                  border: Border.all(color: Colors.white24),
+      body: SafeArea(
+        child: SingleChildScrollView(
+          padding: const EdgeInsets.all(20),
+          child: Column(
+            crossAxisAlignment: CrossAxisAlignment.stretch,
+            children: [
+              const Text(
+                'Create 3D Models with AI',
+                style: TextStyle(
+                  color: Colors.white,
+                  fontSize: 24,
+                  fontWeight: FontWeight.bold,
                 ),
-                child: selectedImage == null
-                    ? const Column(
-                        mainAxisAlignment: MainAxisAlignment.center,
-                        children: [
-                          Icon(
-                            Icons.add_photo_alternate,
-                            size: 75,
-                            color: Colors.blueAccent,
-                          ),
-                          SizedBox(height: 20),
-                          Text(
-                            'Upload Your Image',
-                            style: TextStyle(
-                              color: Colors.white,
-                              fontSize: 20,
+              ),
+              const SizedBox(height: 8),
+              const Text(
+                'Turn your images into 3D models',
+                style: TextStyle(
+                  color: Colors.white60,
+                  fontSize: 15,
+                ),
+              ),
+              const SizedBox(height: 24),
+              GestureDetector(
+                onTap: pickImage,
+                child: Container(
+                  height: 260,
+                  decoration: BoxDecoration(
+                    color: const Color(0xFF171B26),
+                    borderRadius: BorderRadius.circular(20),
+                    border: Border.all(color: Colors.white24),
+                  ),
+                  child: selectedImage == null
+                      ? const Column(
+                          mainAxisAlignment: MainAxisAlignment.center,
+                          children: [
+                            Icon(
+                              Icons.add_photo_alternate_rounded,
+                              size: 64,
+                              color: Colors.blueAccent,
                             ),
+                            SizedBox(height: 12),
+                            Text(
+                              'Upload Your Image',
+                              style: TextStyle(
+                                color: Colors.white,
+                                fontSize: 18,
+                                fontWeight: FontWeight.w600,
+                              ),
+                            ),
+                            SizedBox(height: 6),
+                            Text(
+                              'Tap here to select an image',
+                              style: TextStyle(
+                                color: Colors.white54,
+                                fontSize: 14,
+                              ),
+                            ),
+                          ],
+                        )
+                      : ClipRRect(
+                          borderRadius: BorderRadius.circular(20),
+                          child: Image.file(
+                            selectedImage!,
+                            fit: BoxFit.contain,
                           ),
-                          SizedBox(height: 8),
-                          Text(
-                            'Tap here to select an image',
-                            style: TextStyle(color: Colors.white60),
+                        ),
+                ),
+              ),
+              const SizedBox(height: 20),
+              SizedBox(
+                height: 55,
+                child: ElevatedButton.icon(
+                  onPressed: isGenerating ? null : pickImage,
+                  icon: const Icon(Icons.upload),
+                  label: const Text(
+                    'Choose Image',
+                    style: TextStyle(fontSize: 16, fontWeight: FontWeight.w600),
+                  ),
+                  style: ElevatedButton.styleFrom(
+                    backgroundColor: const Color(0xFF23293A),
+                    foregroundColor: Colors.white,
+                    shape: RoundedRectangleBorder(
+                      borderRadius: BorderRadius.circular(30),
+                    ),
+                  ),
+                ),
+              ),
+              const SizedBox(height: 14),
+              SizedBox(
+                height: 55,
+                child: ElevatedButton.icon(
+                  onPressed: (selectedImage == null || isGenerating)
+                      ? null
+                      : generateModel,
+                  icon: isGenerating
+                      ? const SizedBox(
+                          width: 20,
+                          height: 20,
+                          child: CircularProgressIndicator(
+                            strokeWidth: 2,
+                            color: Colors.white,
                           ),
-                        ],
-                      )
-                    : ClipRRect(
-                        borderRadius: BorderRadius.circular(20),
-                        child: Image.file(
-                          selectedImage!,
-                          fit: BoxFit.contain,
+                        )
+                      : const Icon(Icons.auto_awesome),
+                  label: Text(
+                    isGenerating ? 'Generating 3D...' : 'Generate 3D Model',
+                    style: const TextStyle(
+                      fontSize: 16,
+                      fontWeight: FontWeight.w600,
+                    ),
+                  ),
+                  style: ElevatedButton.styleFrom(
+                    backgroundColor: Colors.blueAccent,
+                    foregroundColor: Colors.white,
+                    disabledBackgroundColor: const Color(0xFF23262F),
+                    disabledForegroundColor: Colors.white38,
+                    shape: RoundedRectangleBorder(
+                      borderRadius: BorderRadius.circular(30),
+                    ),
+                  ),
+                ),
+              ),
+              if (isGenerating && statusMessage.isNotEmpty) ...[
+                const SizedBox(height: 20),
+                Container(
+                  padding: const EdgeInsets.all(14),
+                  decoration: BoxDecoration(
+                    color: const Color(0xFF171B26),
+                    borderRadius: BorderRadius.circular(14),
+                    border: Border.all(color: Colors.blueAccent),
+                  ),
+                  child: Row(
+                    children: [
+                      const SizedBox(
+                        width: 18,
+                        height: 18,
+                        child: CircularProgressIndicator(
+                          strokeWidth: 2,
+                          color: Colors.blueAccent,
                         ),
                       ),
-              ),
-            ),
-            const SizedBox(height: 20),
-            SizedBox(
-              width: double.infinity,
-              height: 55,
-              child: ElevatedButton.icon(
-                onPressed: pickImage,
-                icon: const Icon(Icons.upload),
-                label: const Text('Choose Image'),
-                style: ElevatedButton.styleFrom(
-                  backgroundColor: const Color(0xFF252B48),
-                  foregroundColor: Colors.white,
-                ),
-              ),
-            ),
-            const SizedBox(height: 15),
-            SizedBox(
-              width: double.infinity,
-              height: 55,
-              child: ElevatedButton.icon(
-                onPressed: selectedImage == null
-                    ? null
-                    : () {
-                        ScaffoldMessenger.of(context).showSnackBar(
-                          const SnackBar(
-                            content: Text(
-                              'Image selected! AI generation is our next step.',
-                            ),
+                      const SizedBox(width: 12),
+                      Expanded(
+                        child: Text(
+                          statusMessage,
+                          style: const TextStyle(
+                            color: Colors.white70,
+                            fontSize: 14,
                           ),
-                        );
-                      },
-                icon: const Icon(Icons.auto_awesome),
-                label: const Text('Generate 3D Model'),
-                style: ElevatedButton.styleFrom(
-                  backgroundColor: Colors.blueAccent,
-                  foregroundColor: Colors.white,
+                        ),
+                      ),
+                    ],
+                  ),
+                ),
+              ],
+              const SizedBox(height: 40),
+              const Center(
+                child: Text(
+                  'Powered by My3D AI Studio',
+                  style: TextStyle(color: Colors.white38, fontSize: 13),
                 ),
               ),
-            ),
-            const Spacer(),
-            const Center(
-              child: Text(
-                'Powered by My3D AI Studio',
-                style: TextStyle(
-                  color: Colors.white38,
-                  fontSize: 12,
-                ),
-              ),
-            ),
-            const SizedBox(height: 10),
-          ],
+            ],
+          ),
         ),
       ),
     );
