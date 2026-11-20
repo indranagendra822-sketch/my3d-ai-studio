@@ -14,6 +14,7 @@ class HomeScreen extends StatefulWidget {
 class _HomeScreenState extends State<HomeScreen> {
   File? selectedImage;
   bool isGenerating = false;
+  bool withTexture = true;
   String statusMessage = '';
   final ImagePicker picker = ImagePicker();
 
@@ -43,6 +44,7 @@ class _HomeScreenState extends State<HomeScreen> {
     try {
       final glbPath = await Ai3dService.generate3DModel(
         imageFile: selectedImage!,
+        withTexture: withTexture,
         onStatus: (status) {
           if (!mounted) return;
           setState(() {
@@ -64,7 +66,9 @@ class _HomeScreenState extends State<HomeScreen> {
           builder: (context) => ModelViewerScreen(
             modelSource: glbPath,
             isLocalFile: true,
-            modelName: 'my3d_model.glb',
+            modelName: withTexture
+                ? 'my3d_textured_model.glb'
+                : 'my3d_white_model.glb',
           ),
         ),
       );
@@ -96,6 +100,59 @@ class _HomeScreenState extends State<HomeScreen> {
         ),
       );
     }
+  }
+
+  Widget _buildModeOption({
+    required String title,
+    required String subtitle,
+    required IconData icon,
+    required bool selected,
+    required VoidCallback onTap,
+  }) {
+    return Expanded(
+      child: GestureDetector(
+        onTap: isGenerating ? null : onTap,
+        child: Container(
+          padding: const EdgeInsets.symmetric(vertical: 12, horizontal: 10),
+          decoration: BoxDecoration(
+            color: selected
+                ? Colors.blueAccent.withValues(alpha: 0.2)
+                : const Color(0xFF171B26),
+            borderRadius: BorderRadius.circular(14),
+            border: Border.all(
+              color: selected ? Colors.blueAccent : Colors.white24,
+              width: selected ? 1.8 : 1,
+            ),
+          ),
+          child: Column(
+            children: [
+              Icon(
+                icon,
+                color: selected ? Colors.blueAccent : Colors.white60,
+                size: 22,
+              ),
+              const SizedBox(height: 6),
+              Text(
+                title,
+                style: TextStyle(
+                  color: selected ? Colors.white : Colors.white70,
+                  fontWeight: FontWeight.w600,
+                  fontSize: 13,
+                ),
+              ),
+              const SizedBox(height: 2),
+              Text(
+                subtitle,
+                style: const TextStyle(
+                  color: Colors.white54,
+                  fontSize: 11,
+                ),
+              ),
+            ],
+          ),
+        ),
+      ),
+    );
   }
 
   @override
@@ -135,11 +192,11 @@ class _HomeScreenState extends State<HomeScreen> {
                   fontSize: 15,
                 ),
               ),
-              const SizedBox(height: 24),
+              const SizedBox(height: 20),
               GestureDetector(
                 onTap: pickImage,
                 child: Container(
-                  height: 260,
+                  height: 240,
                   decoration: BoxDecoration(
                     color: const Color(0xFF171B26),
                     borderRadius: BorderRadius.circular(20),
@@ -182,7 +239,27 @@ class _HomeScreenState extends State<HomeScreen> {
                         ),
                 ),
               ),
-              const SizedBox(height: 20),
+              const SizedBox(height: 16),
+              Row(
+                children: [
+                  _buildModeOption(
+                    title: 'Color & Texture',
+                    subtitle: '1-3 min • Full Color',
+                    icon: Icons.palette_rounded,
+                    selected: withTexture,
+                    onTap: () => setState(() => withTexture = true),
+                  ),
+                  const SizedBox(width: 12),
+                  _buildModeOption(
+                    title: 'Fast White',
+                    subtitle: '30-90 sec • Shape',
+                    icon: Icons.bolt_rounded,
+                    selected: !withTexture,
+                    onTap: () => setState(() => withTexture = false),
+                  ),
+                ],
+              ),
+              const SizedBox(height: 18),
               SizedBox(
                 height: 55,
                 child: ElevatedButton.icon(
@@ -219,7 +296,11 @@ class _HomeScreenState extends State<HomeScreen> {
                         )
                       : const Icon(Icons.auto_awesome),
                   label: Text(
-                    isGenerating ? 'Generating 3D...' : 'Generate 3D Model',
+                    isGenerating
+                        ? 'Generating 3D...'
+                        : (withTexture
+                            ? 'Generate Textured 3D'
+                            : 'Generate Fast 3D'),
                     style: const TextStyle(
                       fontSize: 16,
                       fontWeight: FontWeight.w600,
@@ -269,7 +350,7 @@ class _HomeScreenState extends State<HomeScreen> {
                   ),
                 ),
               ],
-              const SizedBox(height: 40),
+              const SizedBox(height: 30),
               const Center(
                 child: Text(
                   'Powered by My3D AI Studio',
