@@ -1,10 +1,9 @@
 import 'dart:async';
 import 'dart:convert';
 import 'dart:io';
-import 'dart:math' as math;
-import 'dart:typed_data';
 import 'package:http/http.dart' as http;
 import 'package:path_provider/path_provider.dart';
+import 'obj_to_glb.dart';
 
 class _UploadResult {
   final String path;
@@ -134,7 +133,7 @@ class Ai3dService {
           return _StartResult(decoded['event_id'].toString(), prefix);
         }
       }
-      lastError = 'AI server error (${res.statusCode}):${_truncate(res.body, 140)}';
+      lastError = 'AI server error (${res.statusCode}): ${_truncate(res.body, 140)}';
       if (res.statusCode != 404 && res.statusCode != 405) {
         throw Exception(lastError);
       }
@@ -303,15 +302,14 @@ class Ai3dService {
           final g = _validGlb(res.bodyBytes);
           if (g != null) return _saveGlb(g);
           final txt = utf8.decode(res.bodyBytes, allowMalformed: true);
-          if (RegExp(r'^v\s+-?\d', multiLine: true).hasMatch(txt) &&
-              RegExp(r'^f\s+\d', multiLine: true).hasMatch(txt)) {
+          if (ObjToGlb.looksLikeObj(txt)) {
             onStatus?.call('Converting 3D mesh to GLB...');
-            final converted = _objToGlb(txt);
+            final converted = ObjToGlb.convert(txt);
             if (converted != null) return _saveGlb(converted);
           }
           logs.add('Unsupported ${url.replaceFirst(baseUrl, '')}');
         } else {
-          logs.add('HTTP ${res.statusCode}${url.replaceFirst(baseUrl, '')}');
+          logs.add('HTTP ${res.statusCode} ${url.replaceFirst(baseUrl, '')}');
         }
       } catch (e) {
         logs.add('ERR: $e');
@@ -320,103 +318,13 @@ class Ai3dService {
     throw Exception('Could not load 3D model.\n${logs.take(4).join('\n')}');
   }
 
-  static Uint8List? _objToGlb(String objText) {
-    final pos = <double>[];
-    final idx = <int>[];
-    for (final raw in const LineSplitter().convert(objText)) {
-      final line = raw.trim();
-      if (line.startsWith('v ')) {
-        final p = line.split(RegExp(r'\s+'));
-        if (p.length >= 4) {
-          final x = double.tryParse(p[1]), y = double.tryParse(p[2]), z = double.tryParse(p[3]);
-          if (x != null && y != null && z != null) pos.addAll([x, y, z]);
-        }
-      } else if (line.startsWith('f ')) {
-        final p = line.split(RegExp(r'\s+'));
-        final vc = pos.length ~/ 3;
-        final face = <int>[];
-        for (int i = 1; i < p.length; i++) {
-          final v = int.tryParse(p[i].split('/')[0]);
-          if (v != null) {
-            final k = v > 0 ? v - 1 : vc + v;
-            if (k >= 0 && k < vc) face.add(k);
-          }
-        }
-        for (int i = 1; i + 1 < face.length; i++) {
-          idx.addAll([face[0], face[i], face[i + 1]]);
-        }
-      }
-    }
-    final vc = pos.length ~/ 3;
-    if (vc < 3 || idx.length < 3) return null;
+  static Future<String> _saveGlb(List<int> bytes) async {
+    final dir = await getTemporaryDirectory();
+    final file = File('${dir.path}/my3d_${DateTime.now().millisecondsSinceEpoch}.glb');
+    await file.writeAsBytes(bytes);
+    return file.path;
+  }
 
-    double minX = pos[0], maxX = pos[0], minY = pos[1], maxY = pos[1], minZ = pos[2], maxZ = pos[2];
-    for (int i = 0; i < pos.length; i += 3) {
-      minX = math.min(minX, pos[i]); maxX = math.max(maxX, pos[i]);
-      minY = math.min(minY, pos[i + 1]); maxY = math.max(maxY, pos[i + 1]);
-      minZ = math.min(minZ, pos[i + 2]); maxZ = math.max(maxZ, pos[i + 2]);
-    }
-
-    final positions = Float32List.fromList(pos);
-    final normals = Float32List(pos.length);
-    final indices = Uint32List.fromList(idx);
-
-    for (int i = 0; i < indices.length; i += 3) {
-      final i0 = indices[i] * 3, i1 = indices[i + 1] * 3, i2 = indices[i + 2] * 3;
-      final ax = positions[i1] - positions[i0], ay = positions[i1 + 1] - positions[i0 + 1], az = positions[i1 + 2] - positions[i0 + 2];
-      final bx = positions[i2] - positions[i0], by = positions[i2 + 1] - positions[i0 + 1], bz = positions[i2 + 2] - positions[i0 + 2];
-      final nx = ay * bz - az * by, ny = az * bx - ax * bz, nz = ax * by - ay * bx;
-      for (final j in [i0, i1, i2]) {
-        normals[j] += nx; normals[j + 1] += ny; normals[j + 2] += nz;
-      }
-    }
-    for (int i = 0; i < normals.length; i += 3) {
-      final len = math.sqrt(normals[i] * normals[i] + normals[i + 1] * normals[i + 1] + normals[i + 2] * normals[i + 2]);
-      if (len > 1e-8) {
-        normals[i] /= len; normals[i + 1] /= len; normals[i + 2] /= len;
-      } else {
-        normals[i + 1] = 1.0;
-      }
-    }
-
-    final pLen = positions.length * 4, nLen = normals.length * 4, iLen = indices.length * 4;
-    final binLen = pLen + nLen + iLen;
-    final bin = ByteData(binLen);
-    int off = 0;
-    for (final v in positions) { bin.setFloat32(off, v, Endian.little); off += 4; }
-    for (final v in normals) { bin.setFloat32(off, v, Endian.little); off += 4; }
-    for (final v in indices) { bin.setUint32(off, v, Endian.little); off += 4; }
-
-    final gltf = {
-      'asset': {'version': '2.0', 'generator': 'My3D AI Studio'},
-      'scene': 0,
-      'scenes': [{'nodes': [0]}],
-      'nodes': [{'mesh': 0}],
-      'materials': [{
-        'pbrMetallicRoughness': {'baseColorFactor': [0.85, 0.85, 0.88, 1.0], 'metallicFactor': 0.1, 'roughnessFactor': 0.7},
-        'doubleSided': true,
-      }],
-      'meshes': [{'primitives': [{'attributes': {'POSITION': 0, 'NORMAL': 1}, 'indices': 2, 'material': 0}]}],
-      'buffers': [{'byteLength': binLen}],
-      'bufferViews': [
-        {'buffer': 0, 'byteOffset': 0, 'byteLength': pLen, 'target': 34962},
-        {'buffer': 0, 'byteOffset': pLen, 'byteLength': nLen, 'target': 34962},
-        {'buffer': 0, 'byteOffset': pLen + nLen, 'byteLength': iLen, 'target': 34963},
-      ],
-      'accessors': [
-        {'bufferView': 0, 'componentType': 5126, 'count': vc, 'type': 'VEC3', 'min': [minX, minY, minZ], 'max': [maxX, maxY, maxZ]},
-        {'bufferView': 1, 'componentType': 5126, 'count': vc, 'type': 'VEC3'},
-        {'bufferView': 2, 'componentType': 5125, 'count': indices.length, 'type': 'SCALAR'},
-      ],
-    };
-
-    final jRaw = utf8.encode(jsonEncode(gltf));
-    final jPad = (4 - (jRaw.length % 4)) % 4;
-    final jLen = jRaw.length + jPad;
-    final total = 12 + 8 + jLen + 8 + binLen;
-    final out = Uint8List(total);
-    final h = ByteData.sublistView(out);
-    h.setUint32(0, 0x46546C67, Endian.little);
-    h.setUint32(4, 2, Endian.little);
-    h.setUint32(8, total, Endian.little);
-    h.setUint32(12, jLen,
+  static String _truncate(String s, int max) =>
+      s.length <= max ? s : '${s.substring(0, max)}...';
+}
