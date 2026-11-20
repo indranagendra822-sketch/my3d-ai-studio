@@ -1,4 +1,3 @@
-
 name: my3d_ai_studio
 description: AI powered Image to 3D Model Generator
 publish_to: 'none'
@@ -12,6 +11,10 @@ dependencies:
     sdk: flutter
   cupertino_icons: ^1.0.8
   image_picker: ^1.2.4
+  http: ^1.2.0
+  model_viewer_plus: ^1.9.0
+  path_provider: ^2.1.0
+  share_plus: ^10.0.0
 
 dev_dependencies:
   flutter_test:
