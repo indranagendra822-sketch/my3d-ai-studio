@@ -1,5 +1,6 @@
 import 'dart:async';
 import 'package:flutter/material.dart';
+import 'package:http/http.dart' as http;
 import 'package:shared_preferences/shared_preferences.dart';
 import 'theme_and_storage.dart';
 import 'create_flow.dart';
@@ -127,30 +128,114 @@ class _HomeScreenState extends State<HomeScreen> {
     final prefs = await SharedPreferences.getInstance();
     final ctrl = TextEditingController(text: prefs.getString('saved_api_url') ?? '');
     if (!mounted) return;
+
+    bool testing = false;
+    String? statusMsg;
+    bool statusOk = false;
+
     showDialog(
       context: context,
-      builder: (_) => AlertDialog(
-        backgroundColor: kCard,
-        shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(20)),
-        title: const Text('Backend API URL', style: TextStyle(color: kLime, fontWeight: FontWeight.bold)),
-        content: TextField(
-          controller: ctrl,
-          decoration: const InputDecoration(hintText: 'https://....trycloudflare.com', border: OutlineInputBorder()),
-        ),
-        actions: [
-          TextButton(onPressed: () => Navigator.pop(context), child: const Text('Cancel', style: TextStyle(color: Colors.grey))),
-          ElevatedButton(
-            style: ElevatedButton.styleFrom(backgroundColor: kLime, foregroundColor: Colors.black),
-            onPressed: () async {
-              await prefs.setString('saved_api_url', ctrl.text.trim());
-              if (mounted) {
-                Navigator.pop(context);
-                showToast(context, 'API URL ಸೇವ್ ಆಗಿದೆ! ✅');
-              }
-            },
-            child: const Text('Save', style: TextStyle(fontWeight: FontWeight.bold)),
+      builder: (ctx) => StatefulBuilder(
+        builder: (ctx, setDialogState) => AlertDialog(
+          backgroundColor: kCard,
+          shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(20)),
+          title: const Text('Backend API URL', style: TextStyle(color: kLime, fontWeight: FontWeight.bold)),
+          content: Column(
+            mainAxisSize: MainAxisSize.min,
+            crossAxisAlignment: CrossAxisAlignment.start,
+            children: [
+              TextField(
+                controller: ctrl,
+                decoration: const InputDecoration(
+                  hintText: 'https://....trycloudflare.com',
+                  border: OutlineInputBorder(),
+                ),
+              ),
+              const SizedBox(height: 12),
+              SizedBox(
+                width: double.infinity,
+                child: OutlinedButton.icon(
+                  onPressed: testing
+                      ? null
+                      : () async {
+                          final raw = ctrl.text.trim();
+                          if (raw.isEmpty) {
+                            setDialogState(() {
+                              statusOk = false;
+                              statusMsg = 'ಮೊದಲು API URL ಹಾಕಿ (Colab backend ಇನ್ನೂ deploy ಆಗಿಲ್ಲ).';
+                            });
+                            return;
+                          }
+                          setDialogState(() {
+                            testing = true;
+                            statusMsg = 'Connecting...';
+                          });
+                          try {
+                            final base = raw.replaceAll(RegExp(r'/$'), '');
+                            final uri = Uri.parse('$base/health');
+                            final res = await http.get(uri).timeout(const Duration(seconds: 8));
+                            setDialogState(() {
+                              testing = false;
+                              statusOk = res.statusCode >= 200 && res.statusCode < 300;
+                              statusMsg = statusOk
+                                  ? 'Connected! (${res.statusCode})'
+                                  : 'Server replied ${res.statusCode}';
+                            });
+                          } catch (_) {
+                            setDialogState(() {
+                              testing = false;
+                              statusOk = false;
+                              statusMsg = 'Reachable ಅಲ್ಲ (Colab backend ಇನ್ನೂ start ಆಗಿಲ್ಲ ಅಥವಾ URL ತಪ್ಪಿದೆ).';
+                            });
+                          }
+                        },
+                  icon: testing
+                      ? const SizedBox(
+                          width: 16,
+                          height: 16,
+                          child: CircularProgressIndicator(strokeWidth: 2, color: kLime),
+                        )
+                      : const Icon(Icons.network_check_rounded, color: kLime, size: 18),
+                  label: Text(
+                    testing ? 'Testing...' : 'Test Connection',
+                    style: const TextStyle(color: kLime, fontWeight: FontWeight.bold),
+                  ),
+                  style: OutlinedButton.styleFrom(
+                    side: const BorderSide(color: kLime),
+                    shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(12)),
+                  ),
+                ),
+              ),
+              if (statusMsg != null) ...[
+                const SizedBox(height: 8),
+                Text(
+                  statusMsg!,
+                  style: TextStyle(
+                    fontSize: 12,
+                    color: statusOk ? kLime : Colors.grey.shade400,
+                  ),
+                ),
+              ],
+            ],
           ),
-        ],
+          actions: [
+            TextButton(
+              onPressed: () => Navigator.pop(ctx),
+              child: const Text('Cancel', style: TextStyle(color: Colors.grey)),
+            ),
+            ElevatedButton(
+              style: ElevatedButton.styleFrom(backgroundColor: kLime, foregroundColor: Colors.black),
+              onPressed: () async {
+                await prefs.setString('saved_api_url', ctrl.text.trim());
+                if (mounted) {
+                  Navigator.pop(ctx);
+                  showToast(context, 'API URL ಸೇವ್ ಆಗಿದೆ! ✅');
+                }
+              },
+              child: const Text('Save', style: TextStyle(fontWeight: FontWeight.bold)),
+            ),
+          ],
+        ),
       ),
     );
   }
