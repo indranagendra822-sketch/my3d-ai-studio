@@ -11,6 +11,37 @@ import 'package:share_plus/share_plus.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 import 'theme_and_storage.dart';
 
+enum ViewAngle { front, left, back, right, extra }
+
+extension ViewAngleLabel on ViewAngle {
+  String get label {
+    switch (this) {
+      case ViewAngle.front:
+        return 'Front';
+      case ViewAngle.left:
+        return 'Left';
+      case ViewAngle.back:
+        return 'Back';
+      case ViewAngle.right:
+        return 'Right';
+      case ViewAngle.extra:
+        return 'Extra';
+    }
+  }
+}
+
+class MultiViewSlot {
+  final String id;
+  ViewAngle angle;
+  File? file;
+
+  MultiViewSlot({
+    required this.id,
+    required this.angle,
+    this.file,
+  });
+}
+
 class UploadScreen extends StatefulWidget {
   const UploadScreen({super.key});
   @override
@@ -18,24 +49,112 @@ class UploadScreen extends StatefulWidget {
 }
 
 class _UploadScreenState extends State<UploadScreen> {
-  File? _img;
+  final List<MultiViewSlot> _slots = [
+    MultiViewSlot(id: 'front', angle: ViewAngle.front),
+    MultiViewSlot(id: 'left', angle: ViewAngle.left),
+    MultiViewSlot(id: 'back', angle: ViewAngle.back),
+    MultiViewSlot(id: 'right', angle: ViewAngle.right),
+  ];
 
-  Future<void> _pick(ImageSource src) async {
+  int _selectedIndex = 0;
+  int _extraCount = 1;
+
+  MultiViewSlot get _activeSlot => _slots[_selectedIndex];
+
+  bool get _hasRequiredFront {
+    final frontSlot = _slots.firstWhere(
+      (s) => s.angle == ViewAngle.front,
+      orElse: () => _slots.first,
+    );
+    return frontSlot.file != null;
+  }
+
+  Future<void> _pickForSlot(int index, ImageSource src) async {
     final p = await ImagePicker().pickImage(source: src);
-    if (p != null) setState(() => _img = File(p.path));
+    if (p == null) return;
+    setState(() {
+      _slots[index].file = File(p.path);
+      _selectedIndex = index;
+    });
+  }
+
+  void _showSourceSheet(int index) {
+    showModalBottomSheet(
+      context: context,
+      backgroundColor: kCard,
+      shape: const RoundedRectangleBorder(
+        borderRadius: BorderRadius.vertical(top: Radius.circular(20)),
+      ),
+      builder: (_) => SafeArea(
+        child: Padding(
+          padding: const EdgeInsets.symmetric(vertical: 12),
+          child: Column(
+            mainAxisSize: MainAxisSize.min,
+            children: [
+              ListTile(
+                leading: const Icon(Icons.photo_library_rounded, color: kLime),
+                title: const Text('Choose from Gallery'),
+                onTap: () {
+                  Navigator.pop(context);
+                  _pickForSlot(index, ImageSource.gallery);
+                },
+              ),
+              ListTile(
+                leading: const Icon(Icons.camera_alt_rounded, color: kLime),
+                title: const Text('Take Photo with Camera'),
+                onTap: () {
+                  Navigator.pop(context);
+                  _pickForSlot(index, ImageSource.camera);
+                },
+              ),
+            ],
+          ),
+        ),
+      ),
+    );
+  }
+
+  void _removeSlotImage(int index) {
+    setState(() {
+      _slots[index].file = null;
+    });
+    showToast(context, '${_slots[index].angle.label} photo removed');
+  }
+
+  void _addExtraSlot() {
+    setState(() {
+      _slots.add(
+        MultiViewSlot(
+          id: 'extra_${_extraCount++}_${DateTime.now().millisecondsSinceEpoch}',
+          angle: ViewAngle.extra,
+        ),
+      );
+      _selectedIndex = _slots.length - 1;
+    });
+    _showSourceSheet(_selectedIndex);
   }
 
   Future<void> _openCutout() async {
-    if (_img == null) return;
+    final currentFile = _activeSlot.file;
+    if (currentFile == null) return;
     final res = await Navigator.push<File>(
       context,
-      MaterialPageRoute(builder: (_) => CutoutScreen(imageFile: _img!)),
+      MaterialPageRoute(builder: (_) => CutoutScreen(imageFile: currentFile)),
     );
-    if (res != null) setState(() => _img = res);
+    if (res != null) {
+      setState(() => _activeSlot.file = res);
+    }
   }
 
   Future<void> _generate() async {
-    if (_img == null) return;
+    if (!_hasRequiredFront) {
+      showToast(context, 'Front view photo ಕಡ್ಡಾಯವಾಗಿದೆ!');
+      return;
+    }
+    final frontFile = _slots
+        .firstWhere((s) => s.angle == ViewAngle.front && s.file != null, orElse: () => _slots.first)
+        .file!;
+
     final url = (await SharedPreferences.getInstance()).getString('saved_api_url') ?? '';
     if (url.isEmpty) {
       if (mounted) showToast(context, 'ಮೊದಲು Home Settings (⚙️) ನಲ್ಲಿ API URL ಸೇವ್ ಮಾಡಿ!');
@@ -44,64 +163,233 @@ class _UploadScreenState extends State<UploadScreen> {
     if (mounted) {
       Navigator.push(
         context,
-        MaterialPageRoute(builder: (_) => ProgressScreen(imageFile: _img!, apiUrl: url)),
+        MaterialPageRoute(builder: (_) => ProgressScreen(imageFile: frontFile, apiUrl: url)),
       );
     }
   }
 
   @override
   Widget build(BuildContext context) {
+    final previewFile = _activeSlot.file;
+
     return Scaffold(
-      appBar: AppBar(title: const Text('New 3D Model', style: TextStyle(fontWeight: FontWeight.bold)), backgroundColor: Colors.transparent),
+      appBar: AppBar(
+        title: const Text('New 3D Model', style: TextStyle(fontWeight: FontWeight.bold)),
+        backgroundColor: Colors.transparent,
+      ),
       body: Padding(
-        padding: const EdgeInsets.fromLTRB(20, 8, 20, 24),
+        padding: const EdgeInsets.fromLTRB(20, 4, 20, 20),
         child: Column(
+          crossAxisAlignment: CrossAxisAlignment.start,
           children: [
+            const Text(
+              'Multi-View Angles (Front required)',
+              style: TextStyle(fontSize: 13, color: Colors.grey, fontWeight: FontWeight.w600),
+            ),
+            const SizedBox(height: 10),
+            SizedBox(
+              height: 112,
+              child: ListView.separated(
+                scrollDirection: Axis.horizontal,
+                itemCount: _slots.length + 1,
+                separatorBuilder: (_, __) => const SizedBox(width: 10),
+                itemBuilder: (context, idx) {
+                  if (idx == _slots.length) {
+                    return _buildAddMoreCard();
+                  }
+                  final slot = _slots[idx];
+                  final isSelected = idx == _selectedIndex;
+                  final isFront = slot.angle == ViewAngle.front;
+
+                  return GestureDetector(
+                    onTap: () {
+                      setState(() => _selectedIndex = idx);
+                      if (slot.file == null) {
+                        _showSourceSheet(idx);
+                      }
+                    },
+                    child: Container(
+                      width: 86,
+                      decoration: BoxDecoration(
+                        color: kCard,
+                        borderRadius: BorderRadius.circular(16),
+                        border: Border.all(
+                          color: isSelected ? kLime : kBorder,
+                          width: isSelected ? 2 : 1,
+                        ),
+                      ),
+                      child: Stack(
+                        children: [
+                          Column(
+                            mainAxisAlignment: MainAxisAlignment.center,
+                            children: [
+                              Expanded(
+                                child: Padding(
+                                  padding: const EdgeInsets.fromLTRB(6, 6, 6, 4),
+                                  child: ClipRRect(
+                                    borderRadius: BorderRadius.circular(11),
+                                    child: Container(
+                                      width: double.infinity,
+                                      color: kBg,
+                                      child: slot.file != null
+                                          ? Image.file(slot.file!, fit: BoxFit.cover)
+                                          : const Icon(Icons.add_a_photo_rounded, color: Colors.grey, size: 24),
+                                    ),
+                                  ),
+                                ),
+                              ),
+                              Padding(
+                                padding: const EdgeInsets.only(bottom: 6, left: 4, right: 4),
+                                child: Text(
+                                  isFront ? 'Front *' : slot.angle.label,
+                                  maxLines: 1,
+                                  overflow: TextOverflow.ellipsis,
+                                  style: TextStyle(
+                                    fontSize: 11,
+                                    fontWeight: FontWeight.bold,
+                                    color: isSelected ? kLime : Colors.white70,
+                                  ),
+                                ),
+                              ),
+                            ],
+                          ),
+                          if (slot.file != null)
+                            Positioned(
+                              top: 4,
+                              right: 4,
+                              child: GestureDetector(
+                                onTap: () => _removeSlotImage(idx),
+                                child: Container(
+                                  padding: const EdgeInsets.all(2),
+                                  decoration: const BoxDecoration(
+                                    color: Colors.black87,
+                                    shape: BoxShape.circle,
+                                  ),
+                                  child: const Icon(Icons.close_rounded, size: 14, color: Colors.white),
+                                ),
+                              ),
+                            ),
+                        ],
+                      ),
+                    ),
+                  );
+                },
+              ),
+            ),
+            const SizedBox(height: 12),
+            Row(
+              children: [
+                Text(
+                  'Angle:',
+                  style: TextStyle(fontSize: 12, color: Colors.grey.shade400),
+                ),
+                const SizedBox(width: 8),
+                DropdownButton<ViewAngle>(
+                  value: _activeSlot.angle,
+                  dropdownColor: kCardLight,
+                  underline: const SizedBox(),
+                  style: const TextStyle(color: kLime, fontWeight: FontWeight.bold, fontSize: 13),
+                  items: ViewAngle.values
+                      .map((a) => DropdownMenuItem(value: a, child: Text(a.label)))
+                      .toList(),
+                  onChanged: (val) {
+                    if (val != null) {
+                      setState(() => _activeSlot.angle = val);
+                    }
+                  },
+                ),
+                const Spacer(),
+                if (previewFile != null)
+                  TextButton.icon(
+                    onPressed: () => _showSourceSheet(_selectedIndex),
+                    icon: const Icon(Icons.swap_horiz_rounded, size: 18, color: kLime),
+                    label: const Text('Replace', style: TextStyle(color: kLime, fontSize: 12)),
+                  ),
+              ],
+            ),
+            const SizedBox(height: 6),
             Expanded(
               child: Container(
                 width: double.infinity,
                 decoration: BoxDecoration(
                   color: kCard,
                   borderRadius: BorderRadius.circular(24),
-                  border: Border.all(color: _img != null ? kLime.withOpacity(0.5) : kBorder, width: 1.5),
+                  border: Border.all(
+                    color: previewFile != null ? kLime.withOpacity(0.5) : kBorder,
+                    width: 1.5,
+                  ),
                 ),
-                child: _img != null
-                    ? ClipRRect(borderRadius: BorderRadius.circular(22), child: Image.file(_img!, fit: BoxFit.contain))
+                child: previewFile != null
+                    ? ClipRRect(
+                        borderRadius: BorderRadius.circular(22),
+                        child: Image.file(previewFile, fit: BoxFit.contain),
+                      )
                     : Column(
                         mainAxisAlignment: MainAxisAlignment.center,
                         children: [
                           Container(
                             padding: const EdgeInsets.all(20),
-                            decoration: BoxDecoration(color: kLime.withOpacity(0.12), shape: BoxShape.circle),
-                            child: const Icon(Icons.add_photo_alternate_rounded, size: 48, color: kLime),
+                            decoration: BoxDecoration(
+                              color: kLime.withOpacity(0.12),
+                              shape: BoxShape.circle,
+                            ),
+                            child: const Icon(Icons.add_photo_alternate_rounded, size: 46, color: kLime),
                           ),
-                          const SizedBox(height: 16),
-                          const Text('Select a photo to begin', style: TextStyle(fontSize: 16, fontWeight: FontWeight.w600)),
+                          const SizedBox(height: 14),
+                          Text(
+                            '${_activeSlot.angle.label} view photo ಆಯ್ಕೆ ಮಾಡಿ',
+                            style: const TextStyle(fontSize: 15, fontWeight: FontWeight.w600),
+                          ),
                           const SizedBox(height: 6),
-                          const Text('Clear background gives the best 3D result', style: TextStyle(color: Colors.grey, fontSize: 12)),
+                          const Text(
+                            'Front view ಕಡ್ಡಾಯ; Left, Back, Right optional',
+                            style: TextStyle(color: Colors.grey, fontSize: 12),
+                          ),
                         ],
                       ),
               ),
             ),
-            const SizedBox(height: 20),
+            const SizedBox(height: 14),
             Row(
               children: [
-                Expanded(child: _toolBtn(Icons.photo_library_rounded, 'Gallery', () => _pick(ImageSource.gallery))),
+                Expanded(
+                  child: _toolBtn(
+                    Icons.photo_library_rounded,
+                    'Gallery',
+                    () => _pickForSlot(_selectedIndex, ImageSource.gallery),
+                  ),
+                ),
                 const SizedBox(width: 10),
-                Expanded(child: _toolBtn(Icons.camera_alt_rounded, 'Camera', () => _pick(ImageSource.camera))),
-                if (_img != null) ...[
+                Expanded(
+                  child: _toolBtn(
+                    Icons.camera_alt_rounded,
+                    'Camera',
+                    () => _pickForSlot(_selectedIndex, ImageSource.camera),
+                  ),
+                ),
+                if (previewFile != null) ...[
                   const SizedBox(width: 10),
-                  Expanded(child: _toolBtn(Icons.auto_fix_high_rounded, 'Cutout', _openCutout, highlight: true)),
+                  Expanded(
+                    child: _toolBtn(
+                      Icons.auto_fix_high_rounded,
+                      'Cutout',
+                      _openCutout,
+                      highlight: true,
+                    ),
+                  ),
                 ],
               ],
             ),
-            const SizedBox(height: 16),
+            const SizedBox(height: 14),
             SizedBox(
               width: double.infinity,
               child: ElevatedButton.icon(
-                onPressed: _img == null ? null : _generate,
+                onPressed: _hasRequiredFront ? _generate : null,
                 icon: const Icon(Icons.bolt_rounded, color: Colors.black, size: 22),
-                label: const Text('Generate 3D Model', style: TextStyle(fontSize: 16, fontWeight: FontWeight.w800, color: Colors.black)),
+                label: const Text(
+                  'Generate 3D Model',
+                  style: TextStyle(fontSize: 16, fontWeight: FontWeight.w800, color: Colors.black),
+                ),
                 style: ElevatedButton.styleFrom(
                   backgroundColor: kLime,
                   disabledBackgroundColor: kCardLight,
@@ -116,11 +404,40 @@ class _UploadScreenState extends State<UploadScreen> {
     );
   }
 
+  Widget _buildAddMoreCard() {
+    return GestureDetector(
+      onTap: _addExtraSlot,
+      child: Container(
+        width: 82,
+        decoration: BoxDecoration(
+          color: kCard,
+          borderRadius: BorderRadius.circular(16),
+          border: Border.all(color: kLime.withOpacity(0.5), width: 1.2),
+        ),
+        child: const Column(
+          mainAxisAlignment: MainAxisAlignment.center,
+          children: [
+            Icon(Icons.add_rounded, color: kLime, size: 28),
+            SizedBox(height: 6),
+            Text('Add More', style: TextStyle(fontSize: 11, color: kLime, fontWeight: FontWeight.bold)),
+          ],
+        ),
+      ),
+    );
+  }
+
   Widget _toolBtn(IconData icon, String label, VoidCallback onTap, {bool highlight = false}) {
     return OutlinedButton.icon(
       onPressed: onTap,
       icon: Icon(icon, size: 18, color: highlight ? kLime : Colors.white),
-      label: Text(label, style: TextStyle(color: highlight ? kLime : Colors.white, fontWeight: FontWeight.w600, fontSize: 13)),
+      label: Text(
+        label,
+        style: TextStyle(
+          color: highlight ? kLime : Colors.white,
+          fontWeight: FontWeight.w600,
+          fontSize: 13,
+        ),
+      ),
       style: OutlinedButton.styleFrom(
         backgroundColor: highlight ? kLime.withOpacity(0.1) : kCard,
         side: BorderSide(color: highlight ? kLime : kBorder),
