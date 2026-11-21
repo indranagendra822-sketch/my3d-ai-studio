@@ -456,3 +456,380 @@ class _CutoutPainter extends CustomPainter {
   @override
   bool shouldRepaint(covariant CustomPainter old) => true;
 }
+class ProgressScreen extends StatefulWidget {
+  final MultiViewPayload payload;
+  final String apiUrl;
+  const ProgressScreen({super.key, required this.payload, required this.apiUrl});
+  @override
+  State<ProgressScreen> createState() => _ProgressScreenState();
+}
+
+class _ProgressScreenState extends State<ProgressScreen> with SingleTickerProviderStateMixin {
+  late AnimationController _pulse;
+  double _p = 0.08;
+  String? _jobId;
+  String _statusText = 'Uploading multi-view photos...';
+  Timer? _pollTimer;
+  bool _cancel = false;
+  String? _err;
+
+  @override
+  void initState() {
+    super.initState();
+    _pulse = AnimationController(vsync: this, duration: const Duration(milliseconds: 1400))..repeat(reverse: true);
+    _run();
+  }
+
+  @override
+  void dispose() {
+    _pulse.dispose();
+    _pollTimer?.cancel();
+    super.dispose();
+  }
+
+  Future<void> _run() async {
+    try {
+      final base = widget.apiUrl.replaceAll(RegExp(r'/$'), '');
+      final req = http.MultipartRequest('POST', Uri.parse('$base/generate'))
+        ..headers['x-api-key'] = 'my3d-secret-2026'
+        ..fields['views_count'] = widget.payload.views.length.toString()
+        ..fields['angles'] = widget.payload.views.map((e) => e.key).join(',');
+
+      for (final entry in widget.payload.views) {
+        req.files.add(await http.MultipartFile.fromPath(entry.key, entry.value.path));
+      }
+      // Backward compatibility for single-file backends expecting 'file'
+      req.files.add(await http.MultipartFile.fromPath('file', widget.payload.frontFile.path));
+
+      final genRes = await http.Response.fromStream(await req.send().timeout(const Duration(minutes: 2)));
+      if (_cancel || !mounted) return;
+
+      if (genRes.statusCode < 200 || genRes.statusCode >= 300) {
+        setState(() => _err = 'Upload Error ${genRes.statusCode}: ${genRes.body}');
+        return;
+      }
+
+      final decoded = jsonDecode(genRes.body);
+      final jobId = (decoded is Map ? (decoded['job_id'] ?? decoded['id'] ?? '') : '').toString();
+      if (jobId.isEmpty) {
+        setState(() => _err = 'Backend did not return a valid job_id.\nResponse: ${genRes.body}');
+        return;
+      }
+
+      setState(() {
+        _jobId = jobId;
+        _p = 0.22;
+        _statusText = 'Job queued ($jobId)';
+      });
+
+      _startPolling(base, jobId);
+    } catch (e) {
+      if (!_cancel && mounted) {
+        setState(() => _err = 'Backend unreachable (Colab server may not be started yet):\n$e');
+      }
+    }
+  }
+
+  void _startPolling(String base, String jobId) {
+    int attempts = 0;
+    _pollTimer = Timer.periodic(const Duration(seconds: 3), (timer) async {
+      if (_cancel || !mounted) {
+        timer.cancel();
+        return;
+      }
+      attempts++;
+      if (attempts > 120) {
+        timer.cancel();
+        if (mounted) setState(() => _err = 'Generation timed out for job $jobId');
+        return;
+      }
+
+      try {
+        final statusRes = await http
+            .get(Uri.parse('$base/status/$jobId'), headers: {'x-api-key': 'my3d-secret-2026'})
+            .timeout(const Duration(seconds: 15));
+        if (_cancel || !mounted) return;
+
+        if (statusRes.statusCode < 200 || statusRes.statusCode >= 300) {
+          setState(() => _statusText = 'Checking job $jobId (HTTP ${statusRes.statusCode})...');
+          return;
+        }
+
+        final data = jsonDecode(statusRes.body);
+        final status = (data['status'] ?? 'processing').toString().toLowerCase();
+        final rawProg = data['progress'];
+        double serverProg = _p;
+        if (rawProg is num) {
+          serverProg = rawProg > 1.0 ? (rawProg / 100.0).clamp(0.0, 1.0) : rawProg.toDouble().clamp(0.0, 1.0);
+        } else {
+          serverProg = (_p + 0.05).clamp(0.22, 0.90);
+        }
+
+        setState(() {
+          _p = serverProg;
+          _statusText = (data['message'] ?? 'Status: $status').toString();
+        });
+
+        if (status == 'completed' || status == 'done' || status == 'finished') {
+          timer.cancel();
+          await _downloadGlb(base, jobId);
+        } else if (status == 'failed' || status == 'error') {
+          timer.cancel();
+          if (mounted) {
+            setState(() => _err = (data['error'] ?? data['message'] ?? '3D generation failed').toString());
+          }
+        }
+      } catch (_) {
+        if (mounted) {
+          setState(() => _statusText = 'Waiting for backend ($jobId)...');
+        }
+      }
+    });
+  }
+
+  Future<void> _downloadGlb(String base, String jobId) async {
+    try {
+      setState(() {
+        _p = 0.95;
+        _statusText = 'Downloading .GLB model...';
+      });
+
+      final dlRes = await http
+          .get(Uri.parse('$base/download/$jobId'), headers: {'x-api-key': 'my3d-secret-2026'})
+          .timeout(const Duration(minutes: 2));
+      if (_cancel || !mounted) return;
+
+      if (dlRes.statusCode != 200 || dlRes.bodyBytes.isEmpty) {
+        setState(() => _err = 'GLB download failed (${dlRes.statusCode})');
+        return;
+      }
+
+      final savedPath = await saveModelWithThumb(dlRes.bodyBytes, widget.payload.frontFile);
+      if (!mounted) return;
+      setState(() {
+        _p = 1.0;
+        _statusText = 'Completed!';
+      });
+      Navigator.pushReplacement(context, MaterialPageRoute(builder: (_) => PreviewScreen(glbPath: savedPath)));
+    } catch (e) {
+      if (!_cancel && mounted) setState(() => _err = 'GLB Download Error: $e');
+    }
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    return Scaffold(
+      appBar: AppBar(title: const Text('Generating 3D'), backgroundColor: Colors.transparent),
+      body: Center(
+        child: Padding(
+          padding: const EdgeInsets.all(24),
+          child: _err != null
+              ? Column(mainAxisAlignment: MainAxisAlignment.center, children: [
+                  const Icon(Icons.error_outline_rounded, size: 60, color: Colors.redAccent),
+                  const SizedBox(height: 14),
+                  Text(_err!, textAlign: TextAlign.center, style: const TextStyle(color: Colors.redAccent)),
+                  const SizedBox(height: 24),
+                  ElevatedButton(
+                    onPressed: () => Navigator.pop(context),
+                    style: ElevatedButton.styleFrom(backgroundColor: kLime, foregroundColor: Colors.black),
+                    child: const Text('Go Back'),
+                  ),
+                ])
+              : Column(mainAxisAlignment: MainAxisAlignment.center, children: [
+                  AnimatedBuilder(
+                    animation: _pulse,
+                    builder: (_, __) => Container(
+                      width: 150,
+                      height: 150,
+                      decoration: BoxDecoration(
+                        shape: BoxShape.circle,
+                        boxShadow: [BoxShadow(color: kLime.withOpacity(0.15 + _pulse.value * 0.2), blurRadius: 28, spreadRadius: 4)],
+                      ),
+                      child: Stack(alignment: Alignment.center, children: [
+                        SizedBox(width: 146, height: 146, child: CircularProgressIndicator(value: _p, strokeWidth: 8, color: kLime, backgroundColor: kCardLight)),
+                        Column(mainAxisSize: MainAxisSize.min, children: [
+                          Transform.scale(scale: 0.92 + _pulse.value * 0.14, child: const Icon(Icons.view_in_ar_rounded, size: 38, color: kLime)),
+                          const SizedBox(height: 4),
+                          Text('${(_p * 100).toInt()}%', style: const TextStyle(fontSize: 22, fontWeight: FontWeight.w900)),
+                        ]),
+                      ]),
+                    ),
+                  ),
+                  const SizedBox(height: 18),
+                  Text(_statusText, textAlign: TextAlign.center, style: const TextStyle(fontSize: 13, color: Colors.white70, fontWeight: FontWeight.w600)),
+                  if (_jobId != null) ...[
+                    const SizedBox(height: 6),
+                    Text('Job ID: $_jobId', style: const TextStyle(fontSize: 12, color: kLime)),
+                  ],
+                  const SizedBox(height: 24),
+                  _step('Uploading ${widget.payload.views.length} angle photo(s)', _p >= 0.15),
+                  _step('Sculpting 3D geometry', _p >= 0.36),
+                  _step('Refining mesh surface', _p >= 0.65),
+                  _step('Downloading .GLB file', _p >= 0.92),
+                  const SizedBox(height: 28),
+                  OutlinedButton(
+                    onPressed: () {
+                      _cancel = true;
+                      _pollTimer?.cancel();
+                      Navigator.pop(context);
+                    },
+                    style: OutlinedButton.styleFrom(
+                      side: const BorderSide(color: kBorder),
+                      padding: const EdgeInsets.symmetric(horizontal: 28, vertical: 12),
+                      shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(14)),
+                    ),
+                    child: const Text('Cancel', style: TextStyle(color: Colors.grey)),
+                  ),
+                ]),
+        ),
+      ),
+    );
+  }
+
+  Widget _step(String t, bool done) => Padding(
+        padding: const EdgeInsets.symmetric(vertical: 6),
+        child: Row(mainAxisAlignment: MainAxisAlignment.center, children: [
+          Icon(done ? Icons.check_circle_rounded : Icons.radio_button_unchecked, color: done ? kLime : Colors.grey, size: 18),
+          const SizedBox(width: 10),
+          Text(t, style: TextStyle(color: done ? Colors.white : Colors.grey, fontWeight: done ? FontWeight.w600 : FontWeight.normal)),
+        ]),
+      );
+}
+
+class PreviewScreen extends StatefulWidget {
+  final String glbPath;
+  const PreviewScreen({super.key, required this.glbPath});
+  @override
+  State<PreviewScreen> createState() => _PreviewScreenState();
+}
+
+class _PreviewScreenState extends State<PreviewScreen> {
+  static const String _defaultOrbit = '0deg 75deg 2.5m';
+  static const String _defaultFov = '45deg';
+
+  bool _rot = true;
+  double _zoomRadius = 2.5;
+  int _viewResetTick = 0;
+
+  void _zoomIn() => setState(() => _zoomRadius = (_zoomRadius - 0.35).clamp(1.4, 4.2));
+  void _zoomOut() => setState(() => _zoomRadius = (_zoomRadius + 0.35).clamp(1.4, 4.2));
+  void _resetView() {
+    setState(() {
+      _zoomRadius = 2.5;
+      _rot = true;
+      _viewResetTick++;
+    });
+    showToast(context, 'View reset to default');
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final orbit = '0deg 75deg ${_zoomRadius.toStringAsFixed(2)}m';
+
+    return Scaffold(
+      appBar: AppBar(
+        title: const Text('3D Preview', style: TextStyle(fontWeight: FontWeight.bold)),
+        backgroundColor: Colors.transparent,
+        actions: [
+          IconButton(tooltip: 'Reset View', icon: const Icon(Icons.refresh_rounded, color: kLime, size: 26), onPressed: _resetView),
+          IconButton(
+            tooltip: '360° Auto-Rotate',
+            icon: Icon(_rot ? Icons.pause_circle_rounded : Icons.play_circle_rounded, color: kLime, size: 28),
+            onPressed: () => setState(() => _rot = !_rot),
+          ),
+        ],
+      ),
+      body: Column(children: [
+        Expanded(
+          child: Stack(children: [
+            ModelViewer(
+              key: ValueKey('$_rot-$_zoomRadius-$_viewResetTick'),
+              src: 'file://${widget.glbPath}',
+              alt: '3D Model',
+              autoRotate: _rot,
+              rotationPerSecond: '30deg',
+              cameraControls: true,
+              cameraOrbit: _viewResetTick == 0 && _zoomRadius == 2.5 ? _defaultOrbit : orbit,
+              fieldOfView: _defaultFov,
+              minCameraOrbit: 'auto auto 1.2m',
+              maxCameraOrbit: 'auto auto 5.0m',
+              backgroundColor: kBg,
+            ),
+            Positioned(
+              right: 14,
+              top: 16,
+              child: Column(children: [
+                _viewerActionBtn(Icons.add_rounded, 'Zoom In', _zoomIn),
+                const SizedBox(height: 10),
+                _viewerActionBtn(Icons.remove_rounded, 'Zoom Out', _zoomOut),
+                const SizedBox(height: 10),
+                _viewerActionBtn(Icons.center_focus_strong_rounded, 'Reset View', _resetView),
+              ]),
+            ),
+            Positioned(
+              left: 14,
+              bottom: 14,
+              child: Container(
+                padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 6),
+                decoration: BoxDecoration(
+                  color: kCard.withOpacity(0.92),
+                  borderRadius: BorderRadius.circular(20),
+                  border: Border.all(color: _rot ? kLime : kBorder),
+                ),
+                child: InkWell(
+                  onTap: () => setState(() => _rot = !_rot),
+                  child: Row(mainAxisSize: MainAxisSize.min, children: [
+                    Icon(Icons.autorenew_rounded, size: 16, color: _rot ? kLime : Colors.grey),
+                    const SizedBox(width: 6),
+                    Text(
+                      _rot ? '360° Rotate: ON' : '360° Rotate: OFF',
+                      style: TextStyle(fontSize: 12, fontWeight: FontWeight.bold, color: _rot ? kLime : Colors.grey),
+                    ),
+                  ]),
+                ),
+              ),
+            ),
+          ]),
+        ),
+        Container(
+          padding: const EdgeInsets.fromLTRB(20, 16, 20, 24),
+          decoration: const BoxDecoration(color: kCard, borderRadius: BorderRadius.vertical(top: Radius.circular(24))),
+          child: Column(children: [
+            Row(mainAxisAlignment: MainAxisAlignment.center, children: [
+              _chip('GLB', true),
+              const SizedBox(width: 10),
+              _chip('OBJ • Soon', false),
+              const SizedBox(width: 10),
+              _chip('FBX • Soon', false),
+            ]),
+            const SizedBox(height: 16),
+            SizedBox(
+              width: double.infinity,
+              child: ElevatedButton.icon(
+                onPressed: () => Share.shareXFiles([XFile(widget.glbPath)], text: 'My3D AI Studio (.glb)'),
+                icon: const Icon(Icons.download_rounded, color: Colors.black),
+                label: const Text('Download / Share .GLB', style: TextStyle(fontSize: 16, fontWeight: FontWeight.w800, color: Colors.black)),
+                style: ElevatedButton.styleFrom(backgroundColor: kLime, padding: const EdgeInsets.symmetric(vertical: 16), shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(16))),
+              ),
+            ),
+          ]),
+        ),
+      ]),
+    );
+  }
+
+  Widget _viewerActionBtn(IconData icon, String tooltip, VoidCallback onTap) {
+    return Material(
+      color: kCard.withOpacity(0.92),
+      shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(12), side: const BorderSide(color: kBorder)),
+      child: InkWell(borderRadius: BorderRadius.circular(12), onTap: onTap, child: Padding(padding: const EdgeInsets.all(10), child: Icon(icon, color: kLime, size: 22))),
+    );
+  }
+
+  Widget _chip(String label, bool active) => Container(
+        padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 6),
+        decoration: BoxDecoration(color: active ? kLime : kBg, borderRadius: BorderRadius.circular(20)),
+        child: Text(label, style: TextStyle(color: active ? Colors.black : Colors.grey, fontWeight: FontWeight.bold, fontSize: 12)),
+      );
+}
+
