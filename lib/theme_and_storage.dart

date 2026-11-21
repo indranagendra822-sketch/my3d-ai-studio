@@ -80,6 +80,6 @@ Future<List<SavedModel>> loadSavedModels() async {
 Future<void> deleteSavedModel(SavedModel m) async {
   if (await m.glbFile.exists()) await m.glbFile.delete();
   if (m.thumbFile != null && await m.thumbFile!.exists()) {
-    await m.thumbFile!.delete();
+    await m.thumbFile!.delete()
   }
 }
