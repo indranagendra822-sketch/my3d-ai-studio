@@ -456,6 +456,7 @@ class _CutoutPainter extends CustomPainter {
   @override
   bool shouldRepaint(covariant CustomPainter old) => true;
 }
+
 class ProgressScreen extends StatefulWidget {
   final MultiViewPayload payload;
   final String apiUrl;
@@ -498,7 +499,6 @@ class _ProgressScreenState extends State<ProgressScreen> with SingleTickerProvid
       for (final entry in widget.payload.views) {
         req.files.add(await http.MultipartFile.fromPath(entry.key, entry.value.path));
       }
-      // Backward compatibility for single-file backends expecting 'file'
       req.files.add(await http.MultipartFile.fromPath('file', widget.payload.frontFile.path));
 
       final genRes = await http.Response.fromStream(await req.send().timeout(const Duration(minutes: 2)));
@@ -704,18 +704,23 @@ class PreviewScreen extends StatefulWidget {
 }
 
 class _PreviewScreenState extends State<PreviewScreen> {
-  static const String _defaultOrbit = '0deg 75deg 2.5m';
+  static const String _defaultOrbit = '0deg 75deg 2.2m';
   static const String _defaultFov = '45deg';
 
   bool _rot = true;
-  double _zoomRadius = 2.5;
+  double _zoomRadius = 2.2;
   int _viewResetTick = 0;
 
-  void _zoomIn() => setState(() => _zoomRadius = (_zoomRadius - 0.35).clamp(1.4, 4.2));
-  void _zoomOut() => setState(() => _zoomRadius = (_zoomRadius + 0.35).clamp(1.4, 4.2));
+  String get _modelSrc {
+    final p = widget.glbPath;
+    return p.startsWith('file://') ? p : 'file://$p';
+  }
+
+  void _zoomIn() => setState(() => _zoomRadius = (_zoomRadius - 0.35).clamp(1.2, 4.2));
+  void _zoomOut() => setState(() => _zoomRadius = (_zoomRadius + 0.35).clamp(1.2, 4.2));
   void _resetView() {
     setState(() {
-      _zoomRadius = 2.5;
+      _zoomRadius = 2.2;
       _rot = true;
       _viewResetTick++;
     });
@@ -728,108 +733,166 @@ class _PreviewScreenState extends State<PreviewScreen> {
 
     return Scaffold(
       appBar: AppBar(
-        title: const Text('3D Preview', style: TextStyle(fontWeight: FontWeight.bold)),
+        title: const Text(
+          '3D Preview',
+          maxLines: 1,
+          softWrap: false,
+          style: TextStyle(fontWeight: FontWeight.bold, fontSize: 18),
+        ),
         backgroundColor: Colors.transparent,
         actions: [
-          IconButton(tooltip: 'Reset View', icon: const Icon(Icons.refresh_rounded, color: kLime, size: 26), onPressed: _resetView),
+          IconButton(
+            tooltip: 'Reset View',
+            icon: const Icon(Icons.refresh_rounded, color: kLime, size: 26),
+            onPressed: _resetView,
+          ),
           IconButton(
             tooltip: '360° Auto-Rotate',
-            icon: Icon(_rot ? Icons.pause_circle_rounded : Icons.play_circle_rounded, color: kLime, size: 28),
+            icon: Icon(
+              _rot ? Icons.pause_circle_rounded : Icons.play_circle_rounded,
+              color: kLime,
+              size: 28,
+            ),
             onPressed: () => setState(() => _rot = !_rot),
           ),
         ],
       ),
-      body: Column(children: [
-        Expanded(
-          child: Stack(children: [
-            ModelViewer(
-              key: ValueKey('$_rot-$_zoomRadius-$_viewResetTick'),
-              src: 'file://${widget.glbPath}',
-              alt: '3D Model',
-              autoRotate: _rot,
-              rotationPerSecond: '30deg',
-              cameraControls: true,
-              cameraOrbit: _viewResetTick == 0 && _zoomRadius == 2.5 ? _defaultOrbit : orbit,
-              fieldOfView: _defaultFov,
-              minCameraOrbit: 'auto auto 1.2m',
-              maxCameraOrbit: 'auto auto 5.0m',
-              backgroundColor: kBg,
-            ),
-            Positioned(
-              right: 14,
-              top: 16,
-              child: Column(children: [
-                _viewerActionBtn(Icons.add_rounded, 'Zoom In', _zoomIn),
-                const SizedBox(height: 10),
-                _viewerActionBtn(Icons.remove_rounded, 'Zoom Out', _zoomOut),
-                const SizedBox(height: 10),
-                _viewerActionBtn(Icons.center_focus_strong_rounded, 'Reset View', _resetView),
-              ]),
-            ),
-            Positioned(
-              left: 14,
-              bottom: 14,
-              child: Container(
-                padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 6),
-                decoration: BoxDecoration(
-                  color: kCard.withOpacity(0.92),
-                  borderRadius: BorderRadius.circular(20),
-                  border: Border.all(color: _rot ? kLime : kBorder),
+      body: Column(
+        children: [
+          Expanded(
+            child: Stack(
+              children: [
+                ModelViewer(
+                  key: ValueKey('$_rot-$_zoomRadius-$_viewResetTick-${widget.glbPath}'),
+                  src: _modelSrc,
+                  alt: 'Generated 3D GLB Model',
+                  loading: Loading.eager,
+                  autoRotate: _rot,
+                  rotationPerSecond: '30deg',
+                  cameraControls: true,
+                  cameraOrbit: _viewResetTick == 0 && _zoomRadius == 2.2 ? _defaultOrbit : orbit,
+                  fieldOfView: _defaultFov,
+                  minCameraOrbit: 'auto auto 1.0m',
+                  maxCameraOrbit: 'auto auto 5.0m',
+                  backgroundColor: kBg,
                 ),
-                child: InkWell(
-                  onTap: () => setState(() => _rot = !_rot),
-                  child: Row(mainAxisSize: MainAxisSize.min, children: [
-                    Icon(Icons.autorenew_rounded, size: 16, color: _rot ? kLime : Colors.grey),
-                    const SizedBox(width: 6),
-                    Text(
-                      _rot ? '360° Rotate: ON' : '360° Rotate: OFF',
-                      style: TextStyle(fontSize: 12, fontWeight: FontWeight.bold, color: _rot ? kLime : Colors.grey),
+                Positioned(
+                  right: 14,
+                  top: 16,
+                  child: Column(
+                    children: [
+                      _viewerActionBtn(Icons.add_rounded, 'Zoom In', _zoomIn),
+                      const SizedBox(height: 10),
+                      _viewerActionBtn(Icons.remove_rounded, 'Zoom Out', _zoomOut),
+                      const SizedBox(height: 10),
+                      _viewerActionBtn(Icons.center_focus_strong_rounded, 'Reset View', _resetView),
+                    ],
+                  ),
+                ),
+                Positioned(
+                  left: 14,
+                  bottom: 14,
+                  child: Container(
+                    padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 6),
+                    decoration: BoxDecoration(
+                      color: kCard.withOpacity(0.92),
+                      borderRadius: BorderRadius.circular(20),
+                      border: Border.all(color: _rot ? kLime : kBorder),
                     ),
-                  ]),
+                    child: InkWell(
+                      onTap: () => setState(() => _rot = !_rot),
+                      child: Row(
+                        mainAxisSize: MainAxisSize.min,
+                        children: [
+                          Icon(
+                            Icons.autorenew_rounded,
+                            size: 16,
+                            color: _rot ? kLime : Colors.grey,
+                          ),
+                          const SizedBox(width: 6),
+                          Text(
+                            _rot ? '360° Rotate: ON' : '360° Rotate: OFF',
+                            style: TextStyle(
+                              fontSize: 12,
+                              fontWeight: FontWeight.bold,
+                              color: _rot ? kLime : Colors.grey,
+                            ),
+                          ),
+                        ],
+                      ),
+                    ),
+                  ),
                 ),
-              ),
+              ],
             ),
-          ]),
-        ),
-        Container(
-          padding: const EdgeInsets.fromLTRB(20, 16, 20, 24),
-          decoration: const BoxDecoration(color: kCard, borderRadius: BorderRadius.vertical(top: Radius.circular(24))),
-          child: Column(children: [
-            Row(mainAxisAlignment: MainAxisAlignment.center, children: [
-              _chip('GLB', true),
-              const SizedBox(width: 10),
-              _chip('OBJ • Soon', false),
-              const SizedBox(width: 10),
-              _chip('FBX • Soon', false),
-            ]),
-            const SizedBox(height: 16),
-            SizedBox(
-              width: double.infinity,
-              child: ElevatedButton.icon(
-                onPressed: () => Share.shareXFiles([XFile(widget.glbPath)], text: 'My3D AI Studio (.glb)'),
-                icon: const Icon(Icons.download_rounded, color: Colors.black),
-                label: const Text('Download / Share .GLB', style: TextStyle(fontSize: 16, fontWeight: FontWeight.w800, color: Colors.black)),
-                style: ElevatedButton.styleFrom(backgroundColor: kLime, padding: const EdgeInsets.symmetric(vertical: 16), shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(16))),
-              ),
+          ),
+          Container(
+            padding: const EdgeInsets.fromLTRB(20, 16, 20, 24),
+            decoration: const BoxDecoration(
+              color: kCard,
+              borderRadius: BorderRadius.vertical(top: Radius.circular(24)),
             ),
-          ]),
-        ),
-      ]),
+            child: Column(
+              children: [
+                Row(
+                  mainAxisAlignment: MainAxisAlignment.center,
+                  children: [
+                    _chip('GLB', true),
+                    const SizedBox(width: 10),
+                    _chip('OBJ • Soon', false),
+                    const SizedBox(width: 10),
+                    _chip('FBX • Soon', false),
+                  ],
+                ),
+                const SizedBox(height: 16),
+                SizedBox(
+                  width: double.infinity,
+                  child: ElevatedButton.icon(
+                    onPressed: () => Share.shareXFiles([XFile(widget.glbPath)], text: 'My3D AI Studio (.glb)'),
+                    icon: const Icon(Icons.download_rounded, color: Colors.black),
+                    label: const Text(
+                      'Download / Share .GLB',
+                      style: TextStyle(fontSize: 16, fontWeight: FontWeight.w800, color: Colors.black),
+                    ),
+                    style: ElevatedButton.styleFrom(
+                      backgroundColor: kLime,
+                      padding: const EdgeInsets.symmetric(vertical: 16),
+                      shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(16)),
+                    ),
+                  ),
+                ),
+              ],
+            ),
+          ),
+        ],
+      ),
     );
   }
 
   Widget _viewerActionBtn(IconData icon, String tooltip, VoidCallback onTap) {
     return Material(
       color: kCard.withOpacity(0.92),
-      shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(12), side: const BorderSide(color: kBorder)),
-      child: InkWell(borderRadius: BorderRadius.circular(12), onTap: onTap, child: Padding(padding: const EdgeInsets.all(10), child: Icon(icon, color: kLime, size: 22))),
+      shape: RoundedRectangleBorder(
+        borderRadius: BorderRadius.circular(12),
+        side: const BorderSide(color: kBorder),
+      ),
+      child: InkWell(
+        borderRadius: BorderRadius.circular(12),
+        onTap: onTap,
+        child: Padding(
+          padding: const EdgeInsets.all(10),
+          child: Icon(icon, color: kLime, size: 22),
+        ),
+      ),
     );
   }
 
   Widget _chip(String label, bool active) => Container(
         padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 6),
         decoration: BoxDecoration(color: active ? kLime : kBg, borderRadius: BorderRadius.circular(20)),
-        child: Text(label, style: TextStyle(color: active ? Colors.black : Colors.grey, fontWeight: FontWeight.bold, fontSize: 12)),
+        child: Text(
+          label,
+          style: TextStyle(color: active ? Colors.black : Colors.grey, fontWeight: FontWeight.bold, fontSize: 12),
+        ),
       );
 }
-
