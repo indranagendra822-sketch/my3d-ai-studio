@@ -4,6 +4,7 @@ import 'package:http/http.dart' as http;
 import 'package:image_picker/image_picker.dart';
 import 'package:path_provider/path_provider.dart';
 import 'package:model_viewer_plus/model_viewer_plus.dart';
+import 'package:share_plus/share_plus.dart';
 
 void main() => runApp(const My3DApp());
 
@@ -88,6 +89,14 @@ class _HomeScreenState extends State<HomeScreen> {
     }
   }
 
+  Future<void> _downloadOrShareModel() async {
+    if (_glbFilePath == null) return;
+    await Share.shareXFiles(
+      [XFile(_glbFilePath!)],
+      text: 'My3D AI Studio - Generated 3D Model (.glb)',
+    );
+  }
+
   @override
   Widget build(BuildContext context) {
     return Scaffold(
@@ -143,6 +152,17 @@ class _HomeScreenState extends State<HomeScreen> {
                       ? Image.file(_selectedImage!, fit: BoxFit.contain)
                       : const Center(child: Text('ಇಲ್ಲಿ ನಿಮ್ಮ 3D ಮಾಡೆಲ್ ಕಾಣಿಸುತ್ತದೆ')),
             ),
+            if (_glbFilePath != null) ...[
+              const SizedBox(height: 12),
+              SizedBox(
+                width: double.infinity,
+                child: FilledButton.tonalIcon(
+                  onPressed: _downloadOrShareModel,
+                  icon: const Icon(Icons.download),
+                  label: const Text('Download / Share .GLB'),
+                ),
+              ),
+            ],
           ],
         ),
       ),
